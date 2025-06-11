@@ -657,7 +657,7 @@ impl CheckStateRootCmd {
         trie_key: &'a [u8],
     ) -> std::io::Result<Option<near_store::db::DBSlice<'a>>> {
         // As cold db strips shard_uid at the beginning of State key, we can add any 8 u8s as prefix.
-        let cold_state_key = [&[1; 8], trie_key.as_ref()].concat();
+        let cold_state_key = [&[1; 8], trie_key].concat();
         store.get(DBCol::State, &cold_state_key)
     }
 }
