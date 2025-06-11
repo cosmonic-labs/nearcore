@@ -62,14 +62,14 @@ impl<'a> BatchedStoreUpdate<'a> {
         insert: bool,
     ) -> std::io::Result<()> {
         let value_bytes = borsh::to_vec(&value)?;
-        let entry_size = key.as_ref().len() + value_bytes.len() + 8;
+        let entry_size = key.len() + value_bytes.len() + 8;
         self.batch_size += entry_size;
         self.total_size_written += entry_size as u64;
         let update = self.store_update.as_mut().unwrap();
         if insert {
             update.insert(col, key.to_vec(), value_bytes);
         } else {
-            update.set(col, key.as_ref(), &value_bytes);
+            update.set(col, key, &value_bytes);
         }
 
         if self.batch_size > self.batch_size_limit {
