@@ -20,6 +20,7 @@ exclude = ["neard"]
 [workspace]
 resolver = "2"
 members = [
+    "benchmarks/runtime",
     "benchmarks/transactions-generator",
     "chain/chain",
     "chain/chunks",

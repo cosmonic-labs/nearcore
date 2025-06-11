@@ -1,0 +1,26 @@
+[package]
+name = "runtime-benchmarks"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+bencher.workspace = true
+integration-tests = { path = "../../integration-tests" }
+near-chain-configs.workspace = true
+near-crypto.workspace = true
+near-parameters.workspace = true
+near-primitives.workspace = true
+near-test-contracts.workspace = true
+node-runtime.workspace = true
+testlib.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "runtime"
+harness = false
