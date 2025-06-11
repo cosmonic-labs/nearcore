@@ -7217,6 +7217,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-benchmarks"
+version = "0.0.0"
+dependencies = [
+ "bencher",
+ "integration-tests",
+ "near-chain-configs",
+ "near-crypto",
+ "near-parameters",
+ "near-primitives",
+ "near-test-contracts",
+ "node-runtime",
+ "testlib",
+]
+
+[[package]]
 name = "runtime-params-estimator"
 version = "0.0.0"
 dependencies = [
