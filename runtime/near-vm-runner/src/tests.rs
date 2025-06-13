@@ -8,6 +8,8 @@ mod runtime_errors;
 pub(crate) mod test_builder;
 mod ts_contract;
 mod wasm_validation;
+#[cfg(feature = "wasmtime_vm")]
+mod wasmtime;
 
 use crate::logic::VMContext;
 use near_parameters::RuntimeConfigStore;
