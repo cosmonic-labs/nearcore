@@ -160,6 +160,9 @@ impl From<WasmFeatures> for wasmtime::Config {
         // preparation code did all the filtering necessary already. Default configuration supports
         // all the necessary features (and, yes, enables more of them.)
         let mut conf = wasmtime::Config::default();
+        conf.wasm_backtrace(false)
+            .wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Disable)
+            .native_unwind_info(false);
         let mut pooling = wasmtime::PoolingAllocationConfig::default();
         pooling
             .table_elements(1_000_000)
