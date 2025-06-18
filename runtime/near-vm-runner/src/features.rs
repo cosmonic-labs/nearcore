@@ -159,6 +159,12 @@ impl From<WasmFeatures> for wasmtime::Config {
     fn from(_: WasmFeatures) -> Self {
         // preparation code did all the filtering necessary already. Default configuration supports
         // all the necessary features (and, yes, enables more of them.)
-        wasmtime::Config::default()
+        let mut conf = wasmtime::Config::default();
+        let mut pooling = wasmtime::PoolingAllocationConfig::default();
+        // Avoid page faults on Linux
+        //pooling.linear_memory_keep_resident(10 * 1024).table_keep_resident(10 * 1024);
+        pooling.table_elements(1_000_000);
+        conf.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
+        conf
     }
 }
