@@ -8,3 +8,5 @@ pessimistic_gas_price_inflation:
   }
 refund_gas_price_changes: { old: true, new: false }
 global_contract_host_fns: { old: false, new: true }
+
+vm_kind: { old: NearVm, new: Wasmtime }
