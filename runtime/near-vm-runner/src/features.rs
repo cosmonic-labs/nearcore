@@ -159,14 +159,25 @@ impl From<WasmFeatures> for wasmtime::Config {
     fn from(_: WasmFeatures) -> Self {
         // preparation code did all the filtering necessary already. Default configuration supports
         // all the necessary features (and, yes, enables more of them.)
-        let mut conf = wasmtime::Config::default();
+        let mut config = wasmtime::Config::default();
+        config.strategy(wasmtime::Strategy::Cranelift);
+
+        // Configure linear memories such that explicit bounds-checking can be
+        // elided.
+        config.memory_reservation(1 << 32);
+        config.memory_guard_size(1 << 32);
         let mut pooling = wasmtime::PoolingAllocationConfig::default();
         pooling
             .table_elements(1_000_000)
+            .total_memories(100)
+            .max_memory_size(1 << 31) // 2 GiB
+            .total_tables(100)
+            .table_elements(5000)
+            .total_core_instances(100)
             // Avoid page faults on Linux
             .linear_memory_keep_resident(10 * 1024)
             .table_keep_resident(10 * 1024);
-        conf.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
-        conf
+        config.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
+        config
     }
 }
