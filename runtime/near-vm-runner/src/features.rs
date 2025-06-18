@@ -161,9 +161,11 @@ impl From<WasmFeatures> for wasmtime::Config {
         // all the necessary features (and, yes, enables more of them.)
         let mut conf = wasmtime::Config::default();
         let mut pooling = wasmtime::PoolingAllocationConfig::default();
-        // Avoid page faults on Linux
-        //pooling.linear_memory_keep_resident(10 * 1024).table_keep_resident(10 * 1024);
-        pooling.table_elements(1_000_000);
+        pooling
+            .table_elements(1_000_000)
+            // Avoid page faults on Linux
+            .linear_memory_keep_resident(10 * 1024)
+            .table_keep_resident(10 * 1024);
         conf.allocation_strategy(wasmtime::InstanceAllocationStrategy::Pooling(pooling));
         conf
     }
