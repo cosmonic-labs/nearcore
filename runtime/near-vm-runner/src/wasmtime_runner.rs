@@ -438,20 +438,23 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
             Err(err) => return Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
         };
         let func = instance.get_func(&mut store, &method);
-        lazy_drop(Box::new(instance));
+        lazy_drop(Box::new((instance, module)));
         let Some(func) = func else {
+            lazy_drop(Box::new(store));
             return Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(
                 logic.result_state,
                 FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound),
             ));
         };
-        match func.typed(&mut store) {
+        let res = match func.typed(&mut store) {
             Ok(run) => match run.call(&mut store, ()) {
                 Ok(()) => Ok(VMOutcome::ok(logic.result_state)),
                 Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
             },
             Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
-        }
+        };
+        lazy_drop(Box::new(store));
+        res
     }
 }
 
