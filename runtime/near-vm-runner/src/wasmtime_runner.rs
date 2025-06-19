@@ -8,7 +8,7 @@ use crate::logic::{External, MemSlice, MemoryLike, VMContext, VMLogic, VMOutcome
 use crate::runner::VMResult;
 use crate::{
     CompiledContract, CompiledContractInfo, Contract, ContractCode, ContractRuntimeCache,
-    NoContractRuntimeCache, get_contract_cache_key, imports, prepare,
+    NoContractRuntimeCache, get_contract_cache_key, imports, lazy_drop, prepare,
 };
 use near_parameters::RuntimeFeesConfig;
 use near_parameters::vm::VMKind;
@@ -425,21 +425,22 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         // TODO: config could be accessed through `logic.result_state`, without this code having to
         // figure it out...
         link(&mut linker, memory_copy, &store, &config, &mut logic);
-        match linker.instantiate(&mut store, &module) {
-            Ok(instance) => match instance.get_func(&mut store, &method) {
-                Some(func) => match func.typed::<(), ()>(&mut store) {
-                    Ok(run) => match run.call(&mut store, ()) {
-                        Ok(_) => Ok(VMOutcome::ok(logic.result_state)),
-                        Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
-                    },
-                    Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
-                },
-                None => {
-                    return Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(
-                        logic.result_state,
-                        FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound),
-                    ));
-                }
+        let instance = match linker.instantiate(&mut store, &module) {
+            Ok(instance) => instance,
+            Err(err) => return Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
+        };
+        let func = instance.get_func(&mut store, &method);
+        lazy_drop(Box::new(instance));
+        let Some(func) = func else {
+            return Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(
+                logic.result_state,
+                FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound),
+            ));
+        };
+        match func.typed(&mut store) {
+            Ok(run) => match run.call(&mut store, ()) {
+                Ok(()) => Ok(VMOutcome::ok(logic.result_state)),
+                Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
             },
             Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
         }
