@@ -17,7 +17,12 @@ use std::cell::{RefCell, UnsafeCell};
 use std::ffi::c_void;
 use std::sync::Arc;
 use wasmtime::ExternType::Func;
-use wasmtime::{Engine, Linker, Memory, MemoryType, Module, Store};
+use wasmtime::{
+    Engine, InstanceAllocationStrategy, Linker, Memory, MemoryType, Module,
+    PoolingAllocationConfig, Store, Strategy,
+};
+
+const PAGE_SIZE: usize = 1 << 16;
 
 type Caller = wasmtime::Caller<'static, ()>;
 thread_local! {
@@ -28,11 +33,11 @@ pub struct WasmtimeMemory(Memory);
 impl WasmtimeMemory {
     pub fn new(
         store: &mut Store<()>,
-        initial_memory_bytes: u32,
-        max_memory_bytes: u32,
+        initial_memory_pages: u32,
+        max_memory_pages: u32,
     ) -> Result<Self, FunctionCallError> {
         Ok(WasmtimeMemory(
-            Memory::new(store, MemoryType::new(initial_memory_bytes, Some(max_memory_bytes)))
+            Memory::new(store, MemoryType::new(initial_memory_pages, Some(max_memory_pages)))
                 .map_err(|_| PrepareError::Memory)?,
         ))
     }
@@ -129,8 +134,21 @@ pub fn get_engine(config: &wasmtime::Config) -> Engine {
 
 pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
     let features = crate::features::WasmFeatures::new(c);
+
+    let max_memory_size = usize::try_from(c.limit_config.max_memory_pages)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(PAGE_SIZE);
+    let mut pooling = PoolingAllocationConfig::default();
+    pooling.table_elements(1_000_000).max_memory_size(max_memory_size);
+
     let mut config = wasmtime::Config::from(features);
-    config.max_wasm_stack(1024 * 1024 * 1024); // wasm stack metering is implemented by instrumentation, we don't want wasmtime to trap before that
+    config
+        .max_wasm_stack(1024 * 1024 * 1024) // wasm stack metering is implemented by instrumentation, we don't want wasmtime to trap before that
+        .strategy(Strategy::Cranelift) // enable the Cranelift optimizing compiler.
+        // Configure linear memories such that explicit bounds-checking can be elided.
+        .memory_reservation(1 << 32)
+        .memory_guard_size(1 << 32)
+        .allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
     config
 }
 
