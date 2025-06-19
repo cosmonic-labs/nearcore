@@ -14,8 +14,9 @@ use near_parameters::RuntimeFeesConfig;
 use near_parameters::vm::VMKind;
 use std::borrow::Cow;
 use std::cell::{RefCell, UnsafeCell};
+use std::collections::{HashMap, hash_map};
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, RwLock};
 use wasmtime::ExternType::Func;
 use wasmtime::{
     Engine, InstanceAllocationStrategy, Linker, Memory, MemoryType, Module,
@@ -29,6 +30,8 @@ thread_local! {
     pub(crate) static CALLER: RefCell<Option<Caller>> = const { RefCell::new(None) };
 }
 pub struct WasmtimeMemory(Memory);
+
+static ENGINES: LazyLock<RwLock<HashMap<Arc<Config>, Engine>>> = LazyLock::new(RwLock::default);
 
 impl WasmtimeMemory {
     pub fn new(
@@ -127,11 +130,6 @@ impl IntoVMError for anyhow::Error {
     }
 }
 
-#[allow(clippy::needless_pass_by_ref_mut)]
-pub fn get_engine(config: &wasmtime::Config) -> Engine {
-    Engine::new(config).unwrap()
-}
-
 pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
     let features = crate::features::WasmFeatures::new(c);
 
@@ -159,12 +157,30 @@ pub(crate) fn wasmtime_vm_hash() -> u64 {
 
 pub(crate) struct WasmtimeVM {
     config: Arc<Config>,
-    engine: wasmtime::Engine,
+    engine: Engine,
 }
 
 impl WasmtimeVM {
     pub(crate) fn new(config: Arc<Config>) -> Self {
-        Self { engine: get_engine(&default_wasmtime_config(&config)), config }
+        {
+            if let Some(engine) =
+                ENGINES.read().expect("failed to read-lock engine map").get(&config)
+            {
+                return Self { config, engine: engine.clone() };
+            }
+        }
+        let engine = Engine::new(&default_wasmtime_config(&config))
+            .expect("failed to contruct Wasmtime engine");
+        match ENGINES.write().expect("failed to write-lock engine map").entry(Arc::clone(&config)) {
+            hash_map::Entry::Occupied(entry) => {
+                let engine = entry.get().clone();
+                Self { config, engine }
+            }
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(engine.clone());
+                Self { config, engine }
+            }
+        }
     }
 
     #[tracing::instrument(target = "vm", level = "debug", "WasmtimeVM::compile_uncached", skip_all)]
