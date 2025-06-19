@@ -128,18 +128,21 @@ pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
         .saturating_mul(PAGE_SIZE);
     let mut pooling = PoolingAllocationConfig::default();
     pooling
-        .table_elements(1_000_000)
         .max_memory_size(max_memory_size)
+        .table_elements(1_000_000)
         // Minimize page faults on Linux
         .linear_memory_keep_resident(max_memory_size)
         .table_keep_resident(1_000_000);
 
     let mut config = wasmtime::Config::from(features);
     config
-        .max_wasm_stack(1024 * 1024 * 1024) // wasm stack metering is implemented by instrumentation, we don't want wasmtime to trap before that
-        .strategy(Strategy::Cranelift) // enable the Cranelift optimizing compiler.
-        // Enable signals-based traps. This is required to elide explicit
-        // bounds-checking.
+        // Enable copy-on-write heap images.
+        .memory_init_cow(true)
+        // wasm stack metering is implemented by instrumentation, we don't want wasmtime to trap before that
+        .max_wasm_stack(1024 * 1024 * 1024)
+        // enable the Cranelift optimizing compiler.
+        .strategy(Strategy::Cranelift)
+        // Enable signals-based traps. This is required to elide explicit bounds-checking.
         .signals_based_traps(true)
         // Configure linear memories such that explicit bounds-checking can be elided.
         .memory_reservation(1 << 32)
