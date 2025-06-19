@@ -484,8 +484,7 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         // figure it out...
         link(&mut linker, memory_copy, &store, &config, &mut logic);
 
-        let _permit = instances.acquire();
-
+        let permit = instances.acquire();
         let instance = linker.instantiate(&mut store, &module);
         lazy_drop(Box::new((linker, module)));
         let out = match instance {
@@ -524,6 +523,7 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
                 instantiation: instantiation + 1,
             });
         }
+        drop(permit);
         Ok(out)
     }
 }
