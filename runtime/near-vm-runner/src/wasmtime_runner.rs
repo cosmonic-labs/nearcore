@@ -1,7 +1,7 @@
 use crate::errors::ContractPrecompilatonResult;
 use crate::logic::errors::{
-    CacheError, CompilationError, FunctionCallError, MethodResolveError, PrepareError,
-    VMLogicError, VMRunnerError, WasmTrap,
+    CacheError, CompilationError, FunctionCallError, MethodResolveError, VMLogicError,
+    VMRunnerError, WasmTrap,
 };
 use crate::logic::{Config, ExecutionResultState, GasCounter};
 use crate::logic::{External, MemSlice, MemoryLike, VMContext, VMLogic, VMOutcome};
@@ -16,6 +16,7 @@ use std::borrow::Cow;
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::{HashMap, hash_map};
 use std::ffi::c_void;
+use std::sync::Mutex;
 use std::sync::{Arc, LazyLock, RwLock};
 use wasmtime::ExternType::Func;
 use wasmtime::{
@@ -32,19 +33,8 @@ thread_local! {
 pub struct WasmtimeMemory(Memory);
 
 static ENGINES: LazyLock<RwLock<HashMap<Arc<Config>, Engine>>> = LazyLock::new(RwLock::default);
-
-impl WasmtimeMemory {
-    pub fn new(
-        store: &mut Store<()>,
-        initial_memory_pages: u32,
-        max_memory_pages: u32,
-    ) -> Result<Self, FunctionCallError> {
-        Ok(WasmtimeMemory(
-            Memory::new(store, MemoryType::new(initial_memory_pages, Some(max_memory_pages)))
-                .map_err(|_| PrepareError::Memory)?,
-        ))
-    }
-}
+static STORES: LazyLock<Mutex<HashMap<Arc<Config>, Vec<(Store<()>, Memory)>>>> =
+    LazyLock::new(Mutex::default);
 
 fn with_caller<T>(func: impl FnOnce(&mut Caller) -> T) -> T {
     CALLER.with(|caller| func(caller.borrow_mut().as_mut().unwrap()))
@@ -366,16 +356,30 @@ impl crate::runner::VM for WasmtimeVM {
                     }
                 }
 
+                {
+                    let mut stores = STORES.lock().expect("failed to lock store pool");
+                    if let Some((store, memory)) = stores.get_mut(&self.config).and_then(Vec::pop) {
+                        let result = PreparationResult::Ready(ReadyContract {
+                            store,
+                            memory: WasmtimeMemory(memory),
+                            module,
+                            method: method.into(),
+                        });
+                        return Ok(PreparedContract { config, gas_counter, result });
+                    }
+                }
                 let mut store = Store::new(module.engine(), ());
-                let memory = WasmtimeMemory::new(
+                let memory = Memory::new(
                     &mut store,
-                    self.config.limit_config.initial_memory_pages,
-                    self.config.limit_config.max_memory_pages,
+                    MemoryType::new(
+                        self.config.limit_config.initial_memory_pages,
+                        Some(self.config.limit_config.max_memory_pages),
+                    ),
                 )
-                .unwrap();
+                .expect("failed to construct memory");
                 let result = PreparationResult::Ready(ReadyContract {
                     store,
-                    memory,
+                    memory: WasmtimeMemory(memory),
                     module,
                     method: method.into(),
                 });
@@ -438,23 +442,26 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
             Err(err) => return Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
         };
         let func = instance.get_func(&mut store, &method);
-        lazy_drop(Box::new((instance, module)));
+        lazy_drop(Box::new((linker, instance, module)));
         let Some(func) = func else {
-            lazy_drop(Box::new(store));
-            return Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(
+            let out = VMOutcome::abort_but_nop_outcome_in_old_protocol(
                 logic.result_state,
                 FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound),
-            ));
+            );
+            let mut stores = STORES.lock().expect("failed to lock store pool");
+            stores.entry(config).or_default().push((store, memory_copy));
+            return Ok(out);
         };
-        let res = match func.typed(&mut store) {
+        let out = match func.typed(&mut store) {
             Ok(run) => match run.call(&mut store, ()) {
-                Ok(()) => Ok(VMOutcome::ok(logic.result_state)),
-                Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
+                Ok(()) => VMOutcome::ok(logic.result_state),
+                Err(err) => VMOutcome::abort(logic.result_state, err.into_vm_error()?),
             },
-            Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
+            Err(err) => VMOutcome::abort(logic.result_state, err.into_vm_error()?),
         };
-        lazy_drop(Box::new(store));
-        res
+        let mut stores = STORES.lock().expect("failed to lock store pool");
+        stores.entry(config).or_default().push((store, memory_copy));
+        Ok(out)
     }
 }
 
