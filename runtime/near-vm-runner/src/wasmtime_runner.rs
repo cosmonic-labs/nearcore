@@ -141,8 +141,8 @@ pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
         .table_elements(1_000_000)
         .max_memory_size(max_memory_size)
         // Minimize page faults on Linux
-        .linear_memory_keep_resident(10 * 1024)
-        .table_keep_resident(10 * 1024);
+        .linear_memory_keep_resident(max_memory_size)
+        .table_keep_resident(1_000_000);
 
     let mut config = wasmtime::Config::from(features);
     config
