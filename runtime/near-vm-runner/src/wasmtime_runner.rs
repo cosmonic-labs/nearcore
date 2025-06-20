@@ -19,11 +19,11 @@ use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use wasmtime::ExternType::Func;
 use wasmtime::{
     DEFAULT_INSTANCE_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TABLE_LIMIT, Engine, Extern, Instance,
-    Linker, Memory, MemoryType, Module, Store, Strategy,
+    Linker, Memory, MemoryType, Module, ModuleExport, Store, Strategy,
 };
-use wasmtime::{ExternType::Func, ModuleExport};
 
 const GUEST_PAGE_SIZE: usize = 1 << 16;
 
@@ -263,6 +263,8 @@ pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
 
     let mut config = wasmtime::Config::from(features);
     config
+        .wasm_backtrace(false)
+        .native_unwind_info(false)
         // Enable copy-on-write heap images.
         .memory_init_cow(true)
         // wasm stack metering is implemented by instrumentation, we don't want wasmtime to trap before that
