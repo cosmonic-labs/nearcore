@@ -3,8 +3,10 @@ use crate::logic::errors::{
     CacheError, CompilationError, FunctionCallError, MethodResolveError, VMLogicError,
     VMRunnerError, WasmTrap,
 };
-use crate::logic::{Config, ExecutionResultState, GasCounter};
-use crate::logic::{External, MemSlice, MemoryLike, VMContext, VMLogic, VMOutcome};
+use crate::logic::{
+    Config, ExecutionResultState, External, GasCounter, MemSlice, MemoryLike, VMContext, VMLogic,
+    VMOutcome,
+};
 use crate::runner::VMResult;
 use crate::{
     CompiledContract, CompiledContractInfo, Contract, ContractCode, ContractRuntimeCache,
@@ -18,10 +20,10 @@ use std::borrow::Cow;
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use wasmtime::ExternType::Func;
 use wasmtime::{
-    DEFAULT_INSTANCE_LIMIT, Engine, InstanceAllocationStrategy, Linker, Memory, MemoryType, Module,
+    Engine, InstanceAllocationStrategy, Linker, Memory, MemoryType, Module,
     PoolingAllocationConfig, ResourcesRequired, Store, Strategy,
 };
 
@@ -44,7 +46,7 @@ static HOST_PAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
     }
 });
 
-const MAX_CONCURRENCY: u16 = 1 << 11;
+//const MAX_CONCURRENCY: u16 = 1 << 11;
 
 type Caller = wasmtime::Caller<'static, ()>;
 thread_local! {
@@ -58,58 +60,58 @@ struct InstanceContext {
     memory: WasmtimeMemory,
 }
 
-struct InstancePermit<'a> {
-    resources: ResourcesRequired,
-    instances: &'a AtomicU64,
-    memories: &'a AtomicU64,
-    tables: &'a AtomicU64,
-}
-
-impl Drop for InstancePermit<'_> {
-    fn drop(&mut self) {
-        self.instances.fetch_sub(1, Ordering::Release);
-        self.memories.fetch_sub(self.resources.num_memories.into(), Ordering::Release);
-        self.tables.fetch_sub(self.resources.num_tables.into(), Ordering::Release);
-    }
-}
-
-// A simple semaphore implemented using a spinlock.
-// It is not expected to be contended often
-#[derive(Clone, Default)]
-struct ConcurrencySemaphore {
-    instances: Arc<AtomicU64>,
-    memories: Arc<AtomicU64>,
-    tables: Arc<AtomicU64>,
-}
-
-impl ConcurrencySemaphore {
-    fn acquire(&self, resources: ResourcesRequired) -> InstancePermit<'_> {
-        debug_assert!(resources.num_memories <= MAX_CONCURRENCY.into());
-        debug_assert!(resources.num_tables <= MAX_CONCURRENCY.into());
-        while self.instances.fetch_add(1, Ordering::Acquire) > MAX_CONCURRENCY.into() {
-            self.instances.fetch_sub(1, Ordering::Release);
-            hint::spin_loop();
-        }
-        while self.memories.fetch_add(resources.num_memories.into(), Ordering::Acquire)
-            > MAX_CONCURRENCY.into()
-        {
-            self.memories.fetch_sub(resources.num_memories.into(), Ordering::Release);
-            hint::spin_loop();
-        }
-        while self.tables.fetch_add(resources.num_tables.into(), Ordering::Acquire)
-            > MAX_CONCURRENCY.into()
-        {
-            self.tables.fetch_sub(resources.num_tables.into(), Ordering::Release);
-            hint::spin_loop();
-        }
-        return InstancePermit {
-            resources,
-            instances: &self.instances,
-            memories: &self.memories,
-            tables: &self.tables,
-        };
-    }
-}
+//struct InstancePermit<'a> {
+//    resources: ResourcesRequired,
+//    instances: &'a AtomicU64,
+//    memories: &'a AtomicU64,
+//    tables: &'a AtomicU64,
+//}
+//
+//impl Drop for InstancePermit<'_> {
+//    fn drop(&mut self) {
+//        self.instances.fetch_sub(1, Ordering::Release);
+//        self.memories.fetch_sub(self.resources.num_memories.into(), Ordering::Release);
+//        self.tables.fetch_sub(self.resources.num_tables.into(), Ordering::Release);
+//    }
+//}
+//
+//// A simple semaphore implemented using a spinlock.
+//// It is not expected to be contended often
+//#[derive(Clone, Default)]
+//struct ConcurrencySemaphore {
+//    instances: Arc<AtomicU64>,
+//    memories: Arc<AtomicU64>,
+//    tables: Arc<AtomicU64>,
+//}
+//
+//impl ConcurrencySemaphore {
+//    fn acquire(&self, resources: ResourcesRequired) -> InstancePermit<'_> {
+//        debug_assert!(resources.num_memories <= MAX_CONCURRENCY.into());
+//        debug_assert!(resources.num_tables <= MAX_CONCURRENCY.into());
+//        while self.instances.fetch_add(1, Ordering::Acquire) > MAX_CONCURRENCY.into() {
+//            self.instances.fetch_sub(1, Ordering::Release);
+//            hint::spin_loop();
+//        }
+//        while self.memories.fetch_add(resources.num_memories.into(), Ordering::Acquire)
+//            > MAX_CONCURRENCY.into()
+//        {
+//            self.memories.fetch_sub(resources.num_memories.into(), Ordering::Release);
+//            hint::spin_loop();
+//        }
+//        while self.tables.fetch_add(resources.num_tables.into(), Ordering::Acquire)
+//            > MAX_CONCURRENCY.into()
+//        {
+//            self.tables.fetch_sub(resources.num_tables.into(), Ordering::Release);
+//            hint::spin_loop();
+//        }
+//        return InstancePermit {
+//            resources,
+//            instances: &self.instances,
+//            memories: &self.memories,
+//            tables: &self.tables,
+//        };
+//    }
+//}
 
 impl InstanceContext {
     fn new(engine: &Engine, config: &LimitConfig) -> Self {
@@ -236,20 +238,20 @@ impl IntoVMError for anyhow::Error {
 pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
     let features = crate::features::WasmFeatures::new(c);
 
-    let max_memory_size = usize::try_from(c.limit_config.max_memory_pages)
-        .unwrap_or(usize::MAX)
-        .saturating_mul(GUEST_PAGE_SIZE);
-    let mut pooling = PoolingAllocationConfig::default();
-    pooling
-        .max_memory_size(max_memory_size)
-        .table_elements(1_000_000)
-        .total_component_instances(0)
-        .total_core_instances(MAX_CONCURRENCY.into())
-        .total_memories(MAX_CONCURRENCY.into())
-        .total_tables(MAX_CONCURRENCY.into())
-        // Minimize page faults on Linux
-        .linear_memory_keep_resident(max_memory_size)
-        .table_keep_resident(1_000_000 * size_of::<*const ()>());
+    //let max_memory_size = usize::try_from(c.limit_config.max_memory_pages)
+    //    .unwrap_or(usize::MAX)
+    //    .saturating_mul(GUEST_PAGE_SIZE);
+    //let mut pooling = PoolingAllocationConfig::default();
+    //pooling
+    //    .max_memory_size(max_memory_size)
+    //    .table_elements(1_000_000)
+    //    .total_component_instances(0)
+    //    .total_core_instances(MAX_CONCURRENCY.into())
+    //    .total_memories(MAX_CONCURRENCY.into())
+    //    .total_tables(MAX_CONCURRENCY.into())
+    //    // Minimize page faults on Linux
+    //    .linear_memory_keep_resident(max_memory_size)
+    //    .table_keep_resident(1_000_000 * size_of::<*const ()>());
 
     let mut config = wasmtime::Config::from(features);
     config
@@ -263,8 +265,8 @@ pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
         .signals_based_traps(true)
         // Configure linear memories such that explicit bounds-checking can be elided.
         .memory_reservation(1 << 32)
-        .memory_guard_size(1 << 32)
-        .allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
+        .memory_guard_size(1 << 32);
+    //.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling));
     config
 }
 
@@ -277,7 +279,7 @@ pub(crate) fn wasmtime_vm_hash() -> u64 {
 pub(crate) struct WasmtimeVM {
     config: Arc<Config>,
     engine: Engine,
-    instances: ConcurrencySemaphore,
+    //instances: ConcurrencySemaphore,
 }
 
 impl WasmtimeVM {
@@ -289,11 +291,12 @@ impl WasmtimeVM {
         }
         let engine = Engine::new(&default_wasmtime_config(&config))
             .expect("failed to contruct Wasmtime engine");
-        let instances = ConcurrencySemaphore::default();
+        //let instances = ConcurrencySemaphore::default();
         VMS.write()
             .expect("failed to write-lock VM pool")
             .entry(Arc::clone(&config))
-            .or_insert(Self { config, engine, instances })
+            //.or_insert(Self { config, engine, instances })
+            .or_insert(Self { config, engine })
             .clone()
     }
 
@@ -485,23 +488,23 @@ impl crate::runner::VM for WasmtimeVM {
                 //        return Ok(PreparedContract { config, gas_counter, result });
                 //    }
                 //}
-                let resources = module.resources_required();
-                if resources.num_tables > MAX_CONCURRENCY.into()
-                    || resources.num_memories > MAX_CONCURRENCY.into()
-                {
-                    // TODO: What the correct error core to return?
-                    let e = FunctionCallError::CompilationError(CompilationError::PrepareError(
-                        crate::logic::errors::PrepareError::Memory,
-                    ));
-                    let result = PreparationResult::OutcomeAbort(e);
-                    return Ok(PreparedContract { config, gas_counter, result });
-                }
+                //let resources = module.resources_required();
+                //if resources.num_tables > MAX_CONCURRENCY.into()
+                //    || resources.num_memories > MAX_CONCURRENCY.into()
+                //{
+                //    // TODO: What the correct error core to return?
+                //    let e = FunctionCallError::CompilationError(CompilationError::PrepareError(
+                //        crate::logic::errors::PrepareError::Memory,
+                //    ));
+                //    let result = PreparationResult::OutcomeAbort(e);
+                //    return Ok(PreparedContract { config, gas_counter, result });
+                //}
                 let context = InstanceContext::new(module.engine(), &config.limit_config);
                 let result = PreparationResult::Ready(ReadyContract {
                     context,
                     module,
                     method: method.into(),
-                    instances: self.instances.clone(),
+                    //instances: self.instances.clone(),
                 });
                 Ok(PreparedContract { config, gas_counter, result })
             },
@@ -514,7 +517,7 @@ struct ReadyContract {
     context: InstanceContext,
     module: Module,
     method: String,
-    instances: ConcurrencySemaphore,
+    //instances: ConcurrencySemaphore,
 }
 
 struct PreparedContract {
@@ -543,7 +546,7 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
             context: InstanceContext { store, mut memory },
             module,
             method,
-            instances,
+            //instances,
         } = match result {
             PreparationResult::Ready(r) => r,
             PreparationResult::OutcomeAbortButNopInOldProtocol(e) => {
@@ -563,29 +566,41 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         // figure it out...
         link(&mut linker, memory_copy, &store, &config, &mut logic);
 
-        let _permit = instances.acquire(module.resources_required());
+        //let _permit = instances.acquire(module.resources_required());
         // ensure store is dropped *before* permit
         let mut store = store;
         let instance = linker.instantiate(&mut store, &module);
-        lazy_drop(Box::new((linker, module)));
         let out = match instance {
             Ok(instance) => {
                 if let Some(func) = instance.get_func(&mut store, &method) {
                     match func.typed(&mut store) {
-                        Ok(run) => match run.call(&mut store, ()) {
-                            Ok(()) => VMOutcome::ok(logic.result_state),
-                            Err(err) => VMOutcome::abort(logic.result_state, err.into_vm_error()?),
-                        },
-                        Err(err) => VMOutcome::abort(logic.result_state, err.into_vm_error()?),
+                        Ok(run) => {
+                            let res = run.call(&mut store, ());
+                            lazy_drop(Box::new((linker, module, store)));
+                            match res {
+                                Ok(()) => VMOutcome::ok(logic.result_state),
+                                Err(err) => {
+                                    VMOutcome::abort(logic.result_state, err.into_vm_error()?)
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            lazy_drop(Box::new((linker, module, store)));
+                            VMOutcome::abort(logic.result_state, err.into_vm_error()?)
+                        }
                     }
                 } else {
+                    lazy_drop(Box::new((linker, module, store)));
                     VMOutcome::abort_but_nop_outcome_in_old_protocol(
                         logic.result_state,
                         FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound),
                     )
                 }
             }
-            Err(err) => VMOutcome::abort(logic.result_state, err.into_vm_error()?),
+            Err(err) => {
+                lazy_drop(Box::new((linker, module, store)));
+                VMOutcome::abort(logic.result_state, err.into_vm_error()?)
+            }
         };
         // debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_TABLE_LIMIT);
         // debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_MEMORY_LIMIT);
