@@ -12,20 +12,18 @@ use crate::{
     CompiledContract, CompiledContractInfo, Contract, ContractCode, ContractRuntimeCache,
     NoContractRuntimeCache, get_contract_cache_key, imports, lazy_drop, prepare,
 };
-use core::hint;
-use core::sync::atomic::{AtomicU64, Ordering};
 use near_parameters::RuntimeFeesConfig;
 use near_parameters::vm::{LimitConfig, VMKind};
 use std::borrow::Cow;
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::{Arc, LazyLock, RwLock};
-use wasmtime::ExternType::Func;
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use wasmtime::{
-    Engine, InstanceAllocationStrategy, Linker, Memory, MemoryType, Module,
-    PoolingAllocationConfig, ResourcesRequired, Store, Strategy,
+    DEFAULT_INSTANCE_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TABLE_LIMIT, Engine, Extern, Instance,
+    Linker, Memory, MemoryType, Module, Store, Strategy,
 };
+use wasmtime::{ExternType::Func, ModuleExport};
 
 const GUEST_PAGE_SIZE: usize = 1 << 16;
 
@@ -58,6 +56,9 @@ pub struct WasmtimeMemory(Memory);
 struct InstanceContext {
     store: Store<()>,
     memory: WasmtimeMemory,
+    instance_budget: usize,
+    table_budget: usize,
+    memory_budget: usize,
 }
 
 //struct InstancePermit<'a> {
@@ -144,12 +145,19 @@ impl InstanceContext {
             MemoryType::new(initial_memory_pages, Some(config.max_memory_pages)),
         )
         .expect("failed to construct memory");
-        Self { store, memory: WasmtimeMemory(memory) }
+        Self {
+            store,
+            memory: WasmtimeMemory(memory),
+            instance_budget: DEFAULT_INSTANCE_LIMIT,
+            table_budget: DEFAULT_TABLE_LIMIT,
+            memory_budget: DEFAULT_MEMORY_LIMIT,
+        }
     }
 }
 
 static VMS: LazyLock<RwLock<HashMap<Arc<Config>, WasmtimeVM>>> = LazyLock::new(RwLock::default);
-//static INSTANCE_CONTEXTS: LazyLock<Mutex<HashMap<Arc<Config>, Vec<InstanceContext>>>> = LazyLock::new(Mutex::default);
+static INSTANCE_CONTEXTS: LazyLock<Mutex<HashMap<Arc<Config>, Vec<InstanceContext>>>> =
+    LazyLock::new(Mutex::default);
 
 fn with_caller<T>(func: impl FnOnce(&mut Caller) -> T) -> T {
     CALLER.with(|caller| func(caller.borrow_mut().as_mut().unwrap()))
@@ -447,65 +455,55 @@ impl crate::runner::VM for WasmtimeVM {
             method,
             |gas_counter, module| {
                 let config = Arc::clone(&self.config);
-                match module.get_export(method) {
-                    Some(export) => match export {
-                        Func(func_type) => {
-                            if func_type.params().len() != 0 || func_type.results().len() != 0 {
-                                let e = FunctionCallError::MethodResolveError(
-                                    MethodResolveError::MethodInvalidSignature,
-                                );
-                                let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
-                                return Ok(PreparedContract { config, gas_counter, result });
+                let Some(Func(func_type)) = module.get_export(method) else {
+                    let e =
+                        FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound);
+                    let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                    return Ok(PreparedContract { config, gas_counter, result });
+                };
+                if func_type.params().len() != 0 || func_type.results().len() != 0 {
+                    let e = FunctionCallError::MethodResolveError(
+                        MethodResolveError::MethodInvalidSignature,
+                    );
+                    let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                    return Ok(PreparedContract { config, gas_counter, result });
+                }
+                let Some(method) = module.get_export_index(method) else {
+                    let e =
+                        FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound);
+                    let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                    return Ok(PreparedContract { config, gas_counter, result });
+                };
+
+                {
+                    let mut cxs =
+                        INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+                    let resources = module.resources_required();
+                    let num_memories = resources.num_memories.try_into().unwrap_or(usize::MAX);
+                    let num_tables = resources.num_tables.try_into().unwrap_or(usize::MAX);
+                    if let Some(cxs) = cxs.get_mut(&self.config) {
+                        while let Some(mut context) = cxs.pop() {
+                            if let Some(budget) = context.memory_budget.checked_sub(num_memories) {
+                                context.memory_budget = budget;
+                            } else {
+                                continue;
                             }
-                        }
-                        _ => {
-                            let e = FunctionCallError::MethodResolveError(
-                                MethodResolveError::MethodNotFound,
-                            );
-                            let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                            if let Some(budget) = context.table_budget.checked_sub(num_tables) {
+                                context.table_budget = budget;
+                            } else {
+                                continue;
+                            }
+                            let result = PreparationResult::Ready(ReadyContract {
+                                context,
+                                module,
+                                method: method.into(),
+                            });
                             return Ok(PreparedContract { config, gas_counter, result });
                         }
-                    },
-                    None => {
-                        let e = FunctionCallError::MethodResolveError(
-                            MethodResolveError::MethodNotFound,
-                        );
-                        let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
-                        return Ok(PreparedContract { config, gas_counter, result });
                     }
                 }
-
-                //{
-                //    let mut cxs =
-                //        INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
-                //    if let Some(context) = cxs.get_mut(&self.config).and_then(Vec::pop) {
-                //        let result = PreparationResult::Ready(ReadyContract {
-                //            context,
-                //            module,
-                //            method: method.into(),
-                //            instances: self.instances.clone(),
-                //        });
-                //        return Ok(PreparedContract { config, gas_counter, result });
-                //    }
-                //}
-                //let resources = module.resources_required();
-                //if resources.num_tables > MAX_CONCURRENCY.into()
-                //    || resources.num_memories > MAX_CONCURRENCY.into()
-                //{
-                //    // TODO: What the correct error core to return?
-                //    let e = FunctionCallError::CompilationError(CompilationError::PrepareError(
-                //        crate::logic::errors::PrepareError::Memory,
-                //    ));
-                //    let result = PreparationResult::OutcomeAbort(e);
-                //    return Ok(PreparedContract { config, gas_counter, result });
-                //}
                 let context = InstanceContext::new(module.engine(), &config.limit_config);
-                let result = PreparationResult::Ready(ReadyContract {
-                    context,
-                    module,
-                    method: method.into(),
-                    //instances: self.instances.clone(),
-                });
+                let result = PreparationResult::Ready(ReadyContract { context, module, method });
                 Ok(PreparedContract { config, gas_counter, result })
             },
         );
@@ -516,7 +514,7 @@ impl crate::runner::VM for WasmtimeVM {
 struct ReadyContract {
     context: InstanceContext,
     module: Module,
-    method: String,
+    method: ModuleExport,
     //instances: ConcurrencySemaphore,
 }
 
@@ -533,6 +531,43 @@ enum PreparationResult {
     Ready(ReadyContract),
 }
 
+enum RunOutcome {
+    Ok,
+    AbortNop(FunctionCallError),
+    Abort(FunctionCallError),
+}
+
+fn call(
+    mut store: &mut Store<()>,
+    instance: Instance,
+    method: ModuleExport,
+) -> Result<RunOutcome, VMRunnerError> {
+    let Some(Extern::Func(func)) = instance.get_module_export(&mut store, &method) else {
+        return Ok(RunOutcome::AbortNop(FunctionCallError::MethodResolveError(
+            MethodResolveError::MethodNotFound,
+        )));
+    };
+    match func.typed(&mut store) {
+        Ok(run) => match run.call(store, ()) {
+            Ok(()) => Ok(RunOutcome::Ok),
+            Err(err) => err.into_vm_error().map(RunOutcome::Abort),
+        },
+        Err(err) => err.into_vm_error().map(RunOutcome::Abort),
+    }
+}
+
+fn instantiate_and_call(
+    mut store: &mut Store<()>,
+    linker: &mut Linker<()>,
+    module: &Module,
+    method: ModuleExport,
+) -> Result<RunOutcome, VMRunnerError> {
+    match linker.instantiate(&mut store, module) {
+        Ok(instance) => call(store, instance, method),
+        Err(err) => err.into_vm_error().map(RunOutcome::Abort),
+    }
+}
+
 impl crate::PreparedContract for VMResult<PreparedContract> {
     fn run(
         self: Box<Self>,
@@ -543,7 +578,8 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         let PreparedContract { config, gas_counter, result } = (*self)?;
         let result_state = ExecutionResultState::new(&context, gas_counter, config);
         let ReadyContract {
-            context: InstanceContext { store, mut memory },
+            context:
+                InstanceContext { mut store, mut memory, instance_budget, table_budget, memory_budget },
             module,
             method,
             //instances,
@@ -556,70 +592,38 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
                 return Ok(VMOutcome::abort(result_state, e));
             }
         };
+        let instance_budget = instance_budget.saturating_sub(1);
 
         let memory_copy = memory.0;
         let config = Arc::clone(&result_state.config);
         let mut logic = VMLogic::new(ext, context, fees_config, result_state, &mut memory);
-        let engine = store.engine();
-        let mut linker = Linker::new(engine);
+        let mut linker = Linker::new(store.engine());
         // TODO: config could be accessed through `logic.result_state`, without this code having to
         // figure it out...
         link(&mut linker, memory_copy, &store, &config, &mut logic);
 
-        //let _permit = instances.acquire(module.resources_required());
-        // ensure store is dropped *before* permit
-        let mut store = store;
-        let instance = linker.instantiate(&mut store, &module);
-        let out = match instance {
-            Ok(instance) => {
-                if let Some(func) = instance.get_func(&mut store, &method) {
-                    match func.typed(&mut store) {
-                        Ok(run) => {
-                            let res = run.call(&mut store, ());
-                            lazy_drop(Box::new((linker, module, store)));
-                            match res {
-                                Ok(()) => VMOutcome::ok(logic.result_state),
-                                Err(err) => {
-                                    VMOutcome::abort(logic.result_state, err.into_vm_error()?)
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            lazy_drop(Box::new((linker, module, store)));
-                            VMOutcome::abort(logic.result_state, err.into_vm_error()?)
-                        }
-                    }
-                } else {
-                    lazy_drop(Box::new((linker, module, store)));
-                    VMOutcome::abort_but_nop_outcome_in_old_protocol(
-                        logic.result_state,
-                        FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound),
-                    )
-                }
+        let res = instantiate_and_call(&mut store, &mut linker, &module, method);
+        if instance_budget > 0 && table_budget > 0 && memory_budget > 0 {
+            let mut stores =
+                INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+            stores.entry(config).or_default().push(InstanceContext {
+                store,
+                memory: WasmtimeMemory(memory_copy),
+                instance_budget,
+                table_budget,
+                memory_budget,
+            });
+            lazy_drop(Box::new((linker, module)));
+        } else {
+            lazy_drop(Box::new((linker, module, store)));
+        }
+        match res? {
+            RunOutcome::Ok => Ok(VMOutcome::ok(logic.result_state)),
+            RunOutcome::AbortNop(error) => {
+                Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(logic.result_state, error))
             }
-            Err(err) => {
-                lazy_drop(Box::new((linker, module, store)));
-                VMOutcome::abort(logic.result_state, err.into_vm_error()?)
-            }
-        };
-        // debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_TABLE_LIMIT);
-        // debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_MEMORY_LIMIT);
-        // // If no unexptected VM error was encountered and we are reasonably sure that
-        // // instantiation will succeed with the store, put it in the pool.
-        // // Modules may define multiple tables/memories/instances, however it is expected
-        // // that most will only use a single one of each.
-        // // FIXME: This measurement should be improved and instead of guessing, we should be counting
-        // // the number of instantiations, memories and tables constructed using the store.
-        // if usize::from(instantiation) < DEFAULT_INSTANCE_LIMIT / 4 {
-        //     let mut stores =
-        //         INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
-        //     stores.entry(config).or_default().push(InstanceContext {
-        //         store,
-        //         memory: WasmtimeMemory(memory_copy),
-        //         instantiation: instantiation + 1,
-        //     });
-        // }
-        Ok(out)
+            RunOutcome::Abort(error) => Ok(VMOutcome::abort(logic.result_state, error)),
+        }
     }
 }
 
