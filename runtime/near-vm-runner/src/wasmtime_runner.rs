@@ -11,9 +11,9 @@ use crate::{
     NoContractRuntimeCache, get_contract_cache_key, imports, lazy_drop, prepare,
 };
 use core::hint;
-use core::sync::atomic::{AtomicU32, Ordering};
-use near_parameters::vm::VMKind;
-use near_parameters::{RuntimeFeesConfig, vm::LimitConfig};
+use core::sync::atomic::{AtomicU64, Ordering};
+use near_parameters::RuntimeFeesConfig;
+use near_parameters::vm::{LimitConfig, VMKind};
 use std::borrow::Cow;
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::HashMap;
@@ -22,10 +22,27 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use wasmtime::ExternType::Func;
 use wasmtime::{
     DEFAULT_INSTANCE_LIMIT, Engine, InstanceAllocationStrategy, Linker, Memory, MemoryType, Module,
-    PoolingAllocationConfig, Store, Strategy,
+    PoolingAllocationConfig, ResourcesRequired, Store, Strategy,
 };
 
-const PAGE_SIZE: usize = 1 << 16;
+const GUEST_PAGE_SIZE: usize = 1 << 16;
+
+static HOST_PAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    #[cfg(miri)]
+    {
+        4096
+    }
+    #[cfg(unix)]
+    {
+        unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() }
+    }
+    #[cfg(windows)]
+    unsafe {
+        let mut info = core::mem::MaybeUninit::uninit();
+        winapi::um::sysinfoapi::GetSystemInfo(info.as_mut_ptr());
+        info.assume_init_ref().dwPageSize as _;
+    }
+});
 
 const MAX_CONCURRENCY: u16 = 1 << 11;
 
@@ -39,47 +56,98 @@ pub struct WasmtimeMemory(Memory);
 struct InstanceContext {
     store: Store<()>,
     memory: WasmtimeMemory,
-    instantiation: u16,
 }
 
-struct InstancePermit<'a>(&'a AtomicU32);
+struct InstancePermit<'a> {
+    resources: ResourcesRequired,
+    instances: &'a AtomicU64,
+    memories: &'a AtomicU64,
+    tables: &'a AtomicU64,
+}
 
 impl Drop for InstancePermit<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Release);
+        self.instances.fetch_sub(1, Ordering::Release);
+        self.memories.fetch_sub(self.resources.num_memories.into(), Ordering::Release);
+        self.tables.fetch_sub(self.resources.num_tables.into(), Ordering::Release);
     }
 }
 
 // A simple semaphore implemented using a spinlock.
 // It is not expected to be contended often
 #[derive(Clone, Default)]
-struct ConcurrencySemaphore(Arc<AtomicU32>);
+struct ConcurrencySemaphore {
+    instances: Arc<AtomicU64>,
+    memories: Arc<AtomicU64>,
+    tables: Arc<AtomicU64>,
+}
 
 impl ConcurrencySemaphore {
-    fn acquire(&self) -> InstancePermit<'_> {
-        while self.0.fetch_add(1, Ordering::Acquire) >= MAX_CONCURRENCY.into() {
-            self.0.fetch_sub(1, Ordering::Release);
+    fn acquire(&self, resources: ResourcesRequired) -> InstancePermit<'_> {
+        debug_assert!(resources.num_memories <= MAX_CONCURRENCY.into());
+        debug_assert!(resources.num_tables <= MAX_CONCURRENCY.into());
+        while self.instances.fetch_add(1, Ordering::Acquire) > MAX_CONCURRENCY.into() {
+            self.instances.fetch_sub(1, Ordering::Release);
             hint::spin_loop();
         }
-        return InstancePermit(&self.0);
+        while self.memories.fetch_add(resources.num_memories.into(), Ordering::Acquire)
+            > MAX_CONCURRENCY.into()
+        {
+            self.memories.fetch_sub(resources.num_memories.into(), Ordering::Release);
+            hint::spin_loop();
+        }
+        while self.tables.fetch_add(resources.num_tables.into(), Ordering::Acquire)
+            > MAX_CONCURRENCY.into()
+        {
+            self.tables.fetch_sub(resources.num_tables.into(), Ordering::Release);
+            hint::spin_loop();
+        }
+        return InstancePermit {
+            resources,
+            instances: &self.instances,
+            memories: &self.memories,
+            tables: &self.tables,
+        };
     }
 }
 
 impl InstanceContext {
     fn new(engine: &Engine, config: &LimitConfig) -> Self {
         let mut store = Store::new(engine, ());
+        let mut minimum = config
+            .initial_memory_pages
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .saturating_mul(GUEST_PAGE_SIZE);
+        let maximum = config
+            .max_memory_pages
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .saturating_mul(GUEST_PAGE_SIZE);
+        let mut initial_memory_pages = config.initial_memory_pages;
+        while minimum < maximum {
+            let host_rem = minimum % *HOST_PAGE_SIZE;
+            let guest_rem = minimum % GUEST_PAGE_SIZE;
+            if host_rem == 0 && guest_rem == 0 {
+                // Ensure that the mmap-ed memory region size is a multiple of host page size to ensure CoW is used
+                // https://github.com/bytecodealliance/wasmtime/blob/18b42ef4e48e498026237013df8ed5af9da0d72d/crates/wasmtime/src/runtime/vm/memory.rs#L526-L530
+                initial_memory_pages =
+                    u32::try_from(minimum.saturating_div(GUEST_PAGE_SIZE)).unwrap_or(u32::MAX);
+                break;
+            }
+            minimum = minimum.saturating_add(host_rem.max(guest_rem)).min(maximum);
+        }
         let memory = Memory::new(
             &mut store,
-            MemoryType::new(config.initial_memory_pages, Some(config.max_memory_pages)),
+            MemoryType::new(initial_memory_pages, Some(config.max_memory_pages)),
         )
         .expect("failed to construct memory");
-        Self { store, memory: WasmtimeMemory(memory), instantiation: 0 }
+        Self { store, memory: WasmtimeMemory(memory) }
     }
 }
 
 static VMS: LazyLock<RwLock<HashMap<Arc<Config>, WasmtimeVM>>> = LazyLock::new(RwLock::default);
-static INSTANCE_CONTEXTS: LazyLock<Mutex<HashMap<Arc<Config>, Vec<InstanceContext>>>> =
-    LazyLock::new(Mutex::default);
+//static INSTANCE_CONTEXTS: LazyLock<Mutex<HashMap<Arc<Config>, Vec<InstanceContext>>>> = LazyLock::new(Mutex::default);
 
 fn with_caller<T>(func: impl FnOnce(&mut Caller) -> T) -> T {
     CALLER.with(|caller| func(caller.borrow_mut().as_mut().unwrap()))
@@ -170,7 +238,7 @@ pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
 
     let max_memory_size = usize::try_from(c.limit_config.max_memory_pages)
         .unwrap_or(usize::MAX)
-        .saturating_mul(PAGE_SIZE);
+        .saturating_mul(GUEST_PAGE_SIZE);
     let mut pooling = PoolingAllocationConfig::default();
     pooling
         .max_memory_size(max_memory_size)
@@ -404,18 +472,29 @@ impl crate::runner::VM for WasmtimeVM {
                     }
                 }
 
+                //{
+                //    let mut cxs =
+                //        INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+                //    if let Some(context) = cxs.get_mut(&self.config).and_then(Vec::pop) {
+                //        let result = PreparationResult::Ready(ReadyContract {
+                //            context,
+                //            module,
+                //            method: method.into(),
+                //            instances: self.instances.clone(),
+                //        });
+                //        return Ok(PreparedContract { config, gas_counter, result });
+                //    }
+                //}
+                let resources = module.resources_required();
+                if resources.num_tables > MAX_CONCURRENCY.into()
+                    || resources.num_memories > MAX_CONCURRENCY.into()
                 {
-                    let mut cxs =
-                        INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
-                    if let Some(context) = cxs.get_mut(&self.config).and_then(Vec::pop) {
-                        let result = PreparationResult::Ready(ReadyContract {
-                            context,
-                            module,
-                            method: method.into(),
-                            instances: self.instances.clone(),
-                        });
-                        return Ok(PreparedContract { config, gas_counter, result });
-                    }
+                    // TODO: What the correct error core to return?
+                    let e = FunctionCallError::CompilationError(CompilationError::PrepareError(
+                        crate::logic::errors::PrepareError::Memory,
+                    ));
+                    let result = PreparationResult::OutcomeAbort(e);
+                    return Ok(PreparedContract { config, gas_counter, result });
                 }
                 let context = InstanceContext::new(module.engine(), &config.limit_config);
                 let result = PreparationResult::Ready(ReadyContract {
@@ -461,7 +540,7 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         let PreparedContract { config, gas_counter, result } = (*self)?;
         let result_state = ExecutionResultState::new(&context, gas_counter, config);
         let ReadyContract {
-            context: InstanceContext { mut store, mut memory, instantiation },
+            context: InstanceContext { store, mut memory },
             module,
             method,
             instances,
@@ -484,7 +563,9 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         // figure it out...
         link(&mut linker, memory_copy, &store, &config, &mut logic);
 
-        let permit = instances.acquire();
+        let _permit = instances.acquire(module.resources_required());
+        // ensure store is dropped *before* permit
+        let mut store = store;
         let instance = linker.instantiate(&mut store, &module);
         lazy_drop(Box::new((linker, module)));
         let out = match instance {
@@ -506,24 +587,23 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
             }
             Err(err) => VMOutcome::abort(logic.result_state, err.into_vm_error()?),
         };
-        debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_TABLE_LIMIT);
-        debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_MEMORY_LIMIT);
-        // If no unexptected VM error was encountered and we are reasonably sure that
-        // instantiation will succeed with the store, put it in the pool.
-        // Modules may define multiple tables/memories/instances, however it is expected
-        // that most will only use a single one of each.
-        // FIXME: This measurement should be improved and instead of guessing, we should be counting
-        // the number of instantiations, memories and tables constructed using the store.
-        if usize::from(instantiation) < DEFAULT_INSTANCE_LIMIT / 4 {
-            let mut stores =
-                INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
-            stores.entry(config).or_default().push(InstanceContext {
-                store,
-                memory: WasmtimeMemory(memory_copy),
-                instantiation: instantiation + 1,
-            });
-        }
-        drop(permit);
+        // debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_TABLE_LIMIT);
+        // debug_assert_eq!(DEFAULT_INSTANCE_LIMIT, wasmtime::DEFAULT_MEMORY_LIMIT);
+        // // If no unexptected VM error was encountered and we are reasonably sure that
+        // // instantiation will succeed with the store, put it in the pool.
+        // // Modules may define multiple tables/memories/instances, however it is expected
+        // // that most will only use a single one of each.
+        // // FIXME: This measurement should be improved and instead of guessing, we should be counting
+        // // the number of instantiations, memories and tables constructed using the store.
+        // if usize::from(instantiation) < DEFAULT_INSTANCE_LIMIT / 4 {
+        //     let mut stores =
+        //         INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+        //     stores.entry(config).or_default().push(InstanceContext {
+        //         store,
+        //         memory: WasmtimeMemory(memory_copy),
+        //         instantiation: instantiation + 1,
+        //     });
+        // }
         Ok(out)
     }
 }
