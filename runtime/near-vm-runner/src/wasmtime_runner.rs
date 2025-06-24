@@ -1,42 +1,108 @@
 use crate::errors::ContractPrecompilatonResult;
 use crate::logic::errors::{
-    CacheError, CompilationError, FunctionCallError, MethodResolveError, PrepareError,
-    VMLogicError, VMRunnerError, WasmTrap,
+    CacheError, CompilationError, FunctionCallError, MethodResolveError, VMLogicError,
+    VMRunnerError, WasmTrap,
 };
-use crate::logic::{Config, ExecutionResultState, GasCounter};
-use crate::logic::{External, MemSlice, MemoryLike, VMContext, VMLogic, VMOutcome};
+use crate::logic::{
+    Config, ExecutionResultState, External, GasCounter, MemSlice, MemoryLike, VMContext, VMLogic,
+    VMOutcome,
+};
 use crate::runner::VMResult;
 use crate::{
     CompiledContract, CompiledContractInfo, Contract, ContractCode, ContractRuntimeCache,
-    NoContractRuntimeCache, get_contract_cache_key, imports, prepare,
+    NoContractRuntimeCache, get_contract_cache_key, imports, lazy_drop, prepare,
 };
 use near_parameters::RuntimeFeesConfig;
-use near_parameters::vm::VMKind;
+use near_parameters::vm::{LimitConfig, VMKind};
 use std::borrow::Cow;
 use std::cell::{RefCell, UnsafeCell};
+use std::collections::HashMap;
 use std::ffi::c_void;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use wasmtime::ExternType::Func;
-use wasmtime::{Engine, Linker, Memory, MemoryType, Module, Store};
+use wasmtime::{
+    DEFAULT_INSTANCE_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TABLE_LIMIT, Engine, Extern, Instance,
+    Linker, Memory, MemoryType, Module, ModuleExport, Store, Strategy,
+};
+
+const GUEST_PAGE_SIZE: usize = 1 << 16;
+
+static HOST_PAGE_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    #[cfg(miri)]
+    {
+        4096
+    }
+    #[cfg(unix)]
+    {
+        unsafe { libc::sysconf(libc::_SC_PAGESIZE).try_into().unwrap() }
+    }
+    #[cfg(windows)]
+    unsafe {
+        let mut info = core::mem::MaybeUninit::uninit();
+        winapi::um::sysinfoapi::GetSystemInfo(info.as_mut_ptr());
+        info.assume_init_ref().dwPageSize as _;
+    }
+});
 
 type Caller = wasmtime::Caller<'static, ()>;
 thread_local! {
     pub(crate) static CALLER: RefCell<Option<Caller>> = const { RefCell::new(None) };
 }
+
 pub struct WasmtimeMemory(Memory);
 
-impl WasmtimeMemory {
-    pub fn new(
-        store: &mut Store<()>,
-        initial_memory_bytes: u32,
-        max_memory_bytes: u32,
-    ) -> Result<Self, FunctionCallError> {
-        Ok(WasmtimeMemory(
-            Memory::new(store, MemoryType::new(initial_memory_bytes, Some(max_memory_bytes)))
-                .map_err(|_| PrepareError::Memory)?,
-        ))
+struct InstanceContext {
+    store: Store<()>,
+    memory: WasmtimeMemory,
+    instance_budget: usize,
+    table_budget: usize,
+    memory_budget: usize,
+}
+
+impl InstanceContext {
+    fn new(engine: &Engine, config: &LimitConfig) -> Self {
+        let mut store = Store::new(engine, ());
+        let mut minimum = config
+            .initial_memory_pages
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .saturating_mul(GUEST_PAGE_SIZE);
+        let maximum = config
+            .max_memory_pages
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .saturating_mul(GUEST_PAGE_SIZE);
+        let mut initial_memory_pages = config.initial_memory_pages;
+        while minimum < maximum {
+            let host_rem = minimum % *HOST_PAGE_SIZE;
+            let guest_rem = minimum % GUEST_PAGE_SIZE;
+            if host_rem == 0 && guest_rem == 0 {
+                // Ensure that the mmap-ed memory region size is a multiple of host page size to ensure CoW is used
+                // https://github.com/bytecodealliance/wasmtime/blob/18b42ef4e48e498026237013df8ed5af9da0d72d/crates/wasmtime/src/runtime/vm/memory.rs#L526-L530
+                initial_memory_pages =
+                    u32::try_from(minimum.saturating_div(GUEST_PAGE_SIZE)).unwrap_or(u32::MAX);
+                break;
+            }
+            minimum = minimum.saturating_add(host_rem.max(guest_rem)).min(maximum);
+        }
+        let memory = Memory::new(
+            &mut store,
+            MemoryType::new(initial_memory_pages, Some(config.max_memory_pages)),
+        )
+        .expect("failed to construct memory");
+        Self {
+            store,
+            memory: WasmtimeMemory(memory),
+            instance_budget: DEFAULT_INSTANCE_LIMIT,
+            table_budget: DEFAULT_TABLE_LIMIT,
+            memory_budget: DEFAULT_MEMORY_LIMIT,
+        }
     }
 }
+
+static VMS: LazyLock<RwLock<HashMap<Arc<Config>, WasmtimeVM>>> = LazyLock::new(RwLock::default);
+static INSTANCE_CONTEXTS: LazyLock<Mutex<HashMap<Arc<Config>, Vec<InstanceContext>>>> =
+    LazyLock::new(Mutex::default);
 
 fn with_caller<T>(func: impl FnOnce(&mut Caller) -> T) -> T {
     CALLER.with(|caller| func(caller.borrow_mut().as_mut().unwrap()))
@@ -122,11 +188,6 @@ impl IntoVMError for anyhow::Error {
     }
 }
 
-#[allow(clippy::needless_pass_by_ref_mut)]
-pub fn get_engine(config: &wasmtime::Config) -> Engine {
-    Engine::new(config).unwrap()
-}
-
 pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
     let features = crate::features::WasmFeatures::new(c);
 
@@ -163,14 +224,26 @@ pub(crate) fn wasmtime_vm_hash() -> u64 {
     64
 }
 
+#[derive(Clone)]
 pub(crate) struct WasmtimeVM {
     config: Arc<Config>,
-    engine: wasmtime::Engine,
+    engine: Engine,
 }
 
 impl WasmtimeVM {
     pub(crate) fn new(config: Arc<Config>) -> Self {
-        Self { engine: get_engine(&default_wasmtime_config(&config)), config }
+        {
+            if let Some(vm) = VMS.read().expect("failed to read-lock VM pool").get(&config) {
+                return vm.clone();
+            }
+        }
+        let engine = Engine::new(&default_wasmtime_config(&config))
+            .expect("failed to contruct Wasmtime engine");
+        VMS.write()
+            .expect("failed to write-lock VM pool")
+            .entry(Arc::clone(&config))
+            .or_insert(Self { config, engine })
+            .clone()
     }
 
     #[tracing::instrument(target = "vm", level = "debug", "WasmtimeVM::compile_uncached", skip_all)]
@@ -320,47 +393,55 @@ impl crate::runner::VM for WasmtimeVM {
             method,
             |gas_counter, module| {
                 let config = Arc::clone(&self.config);
-                match module.get_export(method) {
-                    Some(export) => match export {
-                        Func(func_type) => {
-                            if func_type.params().len() != 0 || func_type.results().len() != 0 {
-                                let e = FunctionCallError::MethodResolveError(
-                                    MethodResolveError::MethodInvalidSignature,
-                                );
-                                let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
-                                return Ok(PreparedContract { config, gas_counter, result });
+                let Some(Func(func_type)) = module.get_export(method) else {
+                    let e =
+                        FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound);
+                    let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                    return Ok(PreparedContract { config, gas_counter, result });
+                };
+                if func_type.params().len() != 0 || func_type.results().len() != 0 {
+                    let e = FunctionCallError::MethodResolveError(
+                        MethodResolveError::MethodInvalidSignature,
+                    );
+                    let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                    return Ok(PreparedContract { config, gas_counter, result });
+                }
+                let Some(method) = module.get_export_index(method) else {
+                    let e =
+                        FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound);
+                    let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                    return Ok(PreparedContract { config, gas_counter, result });
+                };
+
+                {
+                    let mut cxs =
+                        INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+                    let resources = module.resources_required();
+                    let num_memories = resources.num_memories.try_into().unwrap_or(usize::MAX);
+                    let num_tables = resources.num_tables.try_into().unwrap_or(usize::MAX);
+                    if let Some(cxs) = cxs.get_mut(&self.config) {
+                        while let Some(mut context) = cxs.pop() {
+                            if let Some(budget) = context.memory_budget.checked_sub(num_memories) {
+                                context.memory_budget = budget;
+                            } else {
+                                continue;
                             }
-                        }
-                        _ => {
-                            let e = FunctionCallError::MethodResolveError(
-                                MethodResolveError::MethodNotFound,
-                            );
-                            let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
+                            if let Some(budget) = context.table_budget.checked_sub(num_tables) {
+                                context.table_budget = budget;
+                            } else {
+                                continue;
+                            }
+                            let result = PreparationResult::Ready(ReadyContract {
+                                context,
+                                module,
+                                method: method.into(),
+                            });
                             return Ok(PreparedContract { config, gas_counter, result });
                         }
-                    },
-                    None => {
-                        let e = FunctionCallError::MethodResolveError(
-                            MethodResolveError::MethodNotFound,
-                        );
-                        let result = PreparationResult::OutcomeAbortButNopInOldProtocol(e);
-                        return Ok(PreparedContract { config, gas_counter, result });
                     }
                 }
-
-                let mut store = Store::new(module.engine(), ());
-                let memory = WasmtimeMemory::new(
-                    &mut store,
-                    self.config.limit_config.initial_memory_pages,
-                    self.config.limit_config.max_memory_pages,
-                )
-                .unwrap();
-                let result = PreparationResult::Ready(ReadyContract {
-                    store,
-                    memory,
-                    module,
-                    method: method.into(),
-                });
+                let context = InstanceContext::new(module.engine(), &config.limit_config);
+                let result = PreparationResult::Ready(ReadyContract { context, module, method });
                 Ok(PreparedContract { config, gas_counter, result })
             },
         );
@@ -369,10 +450,9 @@ impl crate::runner::VM for WasmtimeVM {
 }
 
 struct ReadyContract {
-    store: Store<()>,
-    memory: WasmtimeMemory,
+    context: InstanceContext,
     module: Module,
-    method: String,
+    method: ModuleExport,
 }
 
 struct PreparedContract {
@@ -388,6 +468,43 @@ enum PreparationResult {
     Ready(ReadyContract),
 }
 
+enum RunOutcome {
+    Ok,
+    AbortNop(FunctionCallError),
+    Abort(FunctionCallError),
+}
+
+fn call(
+    mut store: &mut Store<()>,
+    instance: Instance,
+    method: ModuleExport,
+) -> Result<RunOutcome, VMRunnerError> {
+    let Some(Extern::Func(func)) = instance.get_module_export(&mut store, &method) else {
+        return Ok(RunOutcome::AbortNop(FunctionCallError::MethodResolveError(
+            MethodResolveError::MethodNotFound,
+        )));
+    };
+    match func.typed(&mut store) {
+        Ok(run) => match run.call(store, ()) {
+            Ok(()) => Ok(RunOutcome::Ok),
+            Err(err) => err.into_vm_error().map(RunOutcome::Abort),
+        },
+        Err(err) => err.into_vm_error().map(RunOutcome::Abort),
+    }
+}
+
+fn instantiate_and_call(
+    mut store: &mut Store<()>,
+    linker: &mut Linker<()>,
+    module: &Module,
+    method: ModuleExport,
+) -> Result<RunOutcome, VMRunnerError> {
+    match linker.instantiate(&mut store, module) {
+        Ok(instance) => call(store, instance, method),
+        Err(err) => err.into_vm_error().map(RunOutcome::Abort),
+    }
+}
+
 impl crate::PreparedContract for VMResult<PreparedContract> {
     fn run(
         self: Box<Self>,
@@ -397,7 +514,12 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
     ) -> VMResult {
         let PreparedContract { config, gas_counter, result } = (*self)?;
         let result_state = ExecutionResultState::new(&context, gas_counter, config);
-        let ReadyContract { mut store, mut memory, module, method } = match result {
+        let ReadyContract {
+            context:
+                InstanceContext { mut store, mut memory, instance_budget, table_budget, memory_budget },
+            module,
+            method,
+        } = match result {
             PreparationResult::Ready(r) => r,
             PreparationResult::OutcomeAbortButNopInOldProtocol(e) => {
                 return Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(result_state, e));
@@ -406,32 +528,37 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
                 return Ok(VMOutcome::abort(result_state, e));
             }
         };
+        let instance_budget = instance_budget.saturating_sub(1);
 
         let memory_copy = memory.0;
         let config = Arc::clone(&result_state.config);
         let mut logic = VMLogic::new(ext, context, fees_config, result_state, &mut memory);
-        let engine = store.engine();
-        let mut linker = Linker::new(engine);
+        let mut linker = Linker::new(store.engine());
         // TODO: config could be accessed through `logic.result_state`, without this code having to
         // figure it out...
         link(&mut linker, memory_copy, &store, &config, &mut logic);
-        match linker.instantiate(&mut store, &module) {
-            Ok(instance) => match instance.get_func(&mut store, &method) {
-                Some(func) => match func.typed::<(), ()>(&mut store) {
-                    Ok(run) => match run.call(&mut store, ()) {
-                        Ok(_) => Ok(VMOutcome::ok(logic.result_state)),
-                        Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
-                    },
-                    Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
-                },
-                None => {
-                    return Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(
-                        logic.result_state,
-                        FunctionCallError::MethodResolveError(MethodResolveError::MethodNotFound),
-                    ));
-                }
-            },
-            Err(err) => Ok(VMOutcome::abort(logic.result_state, err.into_vm_error()?)),
+
+        let res = instantiate_and_call(&mut store, &mut linker, &module, method);
+        if instance_budget > 0 && table_budget > 0 && memory_budget > 0 {
+            let mut stores =
+                INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+            stores.entry(config).or_default().push(InstanceContext {
+                store,
+                memory: WasmtimeMemory(memory_copy),
+                instance_budget,
+                table_budget,
+                memory_budget,
+            });
+            lazy_drop(Box::new((linker, module)));
+        } else {
+            lazy_drop(Box::new((linker, module, store)));
+        }
+        match res? {
+            RunOutcome::Ok => Ok(VMOutcome::ok(logic.result_state)),
+            RunOutcome::AbortNop(error) => {
+                Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(logic.result_state, error))
+            }
+            RunOutcome::Abort(error) => Ok(VMOutcome::abort(logic.result_state, error)),
         }
     }
 }

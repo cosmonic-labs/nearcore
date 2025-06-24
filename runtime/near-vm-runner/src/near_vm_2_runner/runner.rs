@@ -1,9 +1,9 @@
 // cspell:ignore waitlist
 
 use super::{NearVmMemory, VM_CONFIG};
-use crate::lazy_drop;
 use crate::cache::CompiledContractInfo;
 use crate::errors::ContractPrecompilatonResult;
+use crate::lazy_drop;
 use crate::logic::errors::{
     CacheError, CompilationError, FunctionCallError, MethodResolveError, VMRunnerError, WasmTrap,
 };
