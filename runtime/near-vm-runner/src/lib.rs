@@ -43,3 +43,29 @@ pub mod internal {
     #[cfg(feature = "prepare")]
     pub use wasmparser;
 }
+
+/// Drop something somewhat lazily.
+///
+/// The memory destruction is sorta expensive process, but not expensive enough to offload it into
+/// a thread for individual instances.
+///
+/// Instead this method will gather up a number of things before initiating a release in a thread,
+/// thus working in batches of sorts and amortizing the thread overhead.
+#[cfg(any(feature = "near_vm", feature = "wasmtime_vm"))]
+pub(crate) fn lazy_drop(what: Box<dyn std::any::Any + Send>) {
+    // TODO: this would benefit from a lock-free array (should be straightforward enough to
+    // implement too...) But for the time being this mutex is not really contended much so…
+    // whatever.
+    const CHUNK_SIZE: usize = 8;
+    static WAITLIST: std::sync::OnceLock<parking_lot::Mutex<Vec<Box<dyn std::any::Any + Send>>>> =
+        std::sync::OnceLock::new();
+    let waitlist = WAITLIST.get_or_init(|| parking_lot::Mutex::new(Vec::with_capacity(CHUNK_SIZE)));
+    let mut waitlist = waitlist.lock();
+    if waitlist.capacity() > waitlist.len() {
+        waitlist.push(Box::new(what));
+    }
+    if waitlist.capacity() == waitlist.len() {
+        let chunk = std::mem::replace(&mut *waitlist, Vec::with_capacity(CHUNK_SIZE));
+        rayon::spawn(move || drop(chunk));
+    }
+}
