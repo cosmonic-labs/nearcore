@@ -1,6 +1,7 @@
 // cspell:ignore waitlist
 
 use super::{NearVmMemory, VM_CONFIG};
+use crate::lazy_drop;
 use crate::cache::CompiledContractInfo;
 use crate::errors::ContractPrecompilatonResult;
 use crate::logic::errors::{
@@ -32,8 +33,6 @@ use near_vm_2_vm::{
     Artifact, ExportFunction, ExportFunctionMetadata, Instantiatable, LinearMemory, LinearTable,
     MemoryStyle, Resolver, TrapCode, VMFunction, VMFunctionKind, VMMemory,
 };
-use parking_lot::Mutex;
-use std::any::Any;
 use std::mem::size_of;
 use std::sync::{Arc, OnceLock};
 
@@ -438,30 +437,6 @@ impl NearVM {
         }
 
         Ok(Ok(()))
-    }
-}
-
-/// Drop something somewhat lazily.
-///
-/// The memory destruction is sorta expensive process, but not expensive enough to offload it into
-/// a thread for individual instances.
-///
-/// Instead this method will gather up a number of things before initiating a release in a thread,
-/// thus working in batches of sorts and amortizing the thread overhead.
-fn lazy_drop(what: Box<dyn Any + Send>) {
-    // TODO: this would benefit from a lock-free array (should be straightforward enough to
-    // implement too...) But for the time being this mutex is not really contended much so…
-    // whatever.
-    const CHUNK_SIZE: usize = 8;
-    static WAITLIST: OnceLock<Mutex<Vec<Box<dyn Any + Send>>>> = OnceLock::new();
-    let waitlist = WAITLIST.get_or_init(|| Mutex::new(Vec::with_capacity(CHUNK_SIZE)));
-    let mut waitlist = waitlist.lock();
-    if waitlist.capacity() > waitlist.len() {
-        waitlist.push(Box::new(what));
-    }
-    if waitlist.capacity() == waitlist.len() {
-        let chunk = std::mem::replace(&mut *waitlist, Vec::with_capacity(CHUNK_SIZE));
-        rayon::spawn(move || drop(chunk));
     }
 }
 
