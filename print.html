@@ -4317,7 +4317,7 @@ with <code>http</code> is going to be cumbersome though — transactions are bor
 to bytes, then signed, then encoded in base64 for JSON.</p>
 <p>So we will use the official <a href="https://docs.near.org/tools/near-cli">NEAR CLI</a> utility.</p>
 <p>Install it via <code>npm</code>:</p>
-<pre><code class="language-console">$ npm install -g near-cli
+<pre><code class="language-console">$ npm install -g near-cli@3.4.2
 $ near -h
 Usage: near &lt;command&gt; [options]
 
@@ -4398,7 +4398,7 @@ binary we've built from source. The steps are:</p>
 <li>Create configs with <code>cargo run --profile dev-release -p neard -- init</code></li>
 <li>Run the node with <code>cargo run --profile dev-release -p neard -- run</code></li>
 <li>Poke the node with <code>httpie</code> or</li>
-<li>Install <code>near-cli</code> via <code>npm install -g near-cli</code></li>
+<li>Install <code>near-cli</code> via <code>npm install -g near-cli@3.4.2</code></li>
 <li>Submit transactions via <code>NEAR_ENV=local near create-account ...</code></li>
 </ul>
 <p>In the <a href="practices/workflows/./deploy_a_contract.html">next chapter</a>, we'll learn how to deploy a simple
@@ -4538,7 +4538,7 @@ declare the <code>hello</code> export:</p>
 
 #![no_std]
 
-extern &quot;C&quot; {
+unsafe extern &quot;C&quot; {
     fn value_return(len: u64, ptr: u64);
 }
 
@@ -4594,7 +4594,7 @@ http://localhost:9001/transactions/GDbTLUGeVaddhcdrQScVauYvgGXxSssEPGUSUVAhMWw8
 Done deploying to alice.test.near
 </code></pre>
 <p>And, finally, let's call our contract:</p>
-<pre><code class="language-console">$ NEAR_ENV=local $near call alice.test.near hello --accountId alice.test.near
+<pre><code class="language-console">$ NEAR_ENV=local near call alice.test.near hello --accountId alice.test.near
 Scheduling a call: alice.test.near.hello()
 Loaded master account test.near key from /home/matklad/.near/validator_key.json with public key = ed25519:ChLD1qYic3G9qKyzgFG3PifrJs49CDYeERGsG58yaSoL
 Doing account.functionCall()
@@ -4607,7 +4607,7 @@ http://localhost:9001/transactions/9WMwmTf6pnFMtj1KBqjJtkKvdFXS4kt3DHnYRnbFpJ9e
 we are calling, the second time to determine who calls the contract. That is,
 the second account is the one that spends tokens. In the following example <code>bob</code>
 spends NEAR to call the contact deployed to the <code>alice</code> account:</p>
-<pre><code class="language-console">$ NEAR_ENV=local $near call alice.test.near hello --accountId bob.test.near
+<pre><code class="language-console">$ NEAR_ENV=local near call alice.test.near hello --accountId bob.test.near
 Scheduling a call: alice.test.near.hello()
 Loaded master account test.near key from /home/matklad/.near/validator_key.json with public key = ed25519:ChLD1qYic3G9qKyzgFG3PifrJs49CDYeERGsG58yaSoL
 Doing account.functionCall()
@@ -6262,7 +6262,7 @@ test is set (in milliseconds).</li>
 </ol>
 <p>For an example of a test that launches multiple nodes, see
 <code>chunks_produced_and_distributed_common</code> in
-<a href="https://github.com/near/nearcore/blob/master/chain/client/src/tests/chunks_management.rs">tests/chunks_management.rs</a>.
+<a href="https://github.com/near/nearcore/blob/master/integration-tests/src/tests/client/chunks_management.rs">integration-tests/src/tests/client/chunks_management.rs | Network chunk management test</a>.
 The <code>setup_mock_all_validators</code> function is the key piece of infrastructure here.</p>
 <h2 id="runtime"><a class="header" href="#runtime">Runtime</a></h2>
 <p>Tests for Runtime are listed in
