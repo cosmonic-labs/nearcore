@@ -20,7 +20,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use near_parameters::RuntimeFeesConfig;
 use near_parameters::vm::VMKind;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, RwLock};
 use wasmtime::{Engine, ExternType, Instance, Linker, Memory, MemoryType, Module, Store, Strategy};
 
 const GUEST_PAGE_SIZE: usize = 1 << 16;
@@ -192,9 +193,20 @@ pub(crate) struct WasmtimeVM {
 
 impl WasmtimeVM {
     pub(crate) fn new(config: Arc<Config>) -> Self {
+        static VMS: LazyLock<RwLock<HashMap<Arc<Config>, WasmtimeVM>>> =
+            LazyLock::new(RwLock::default);
+        {
+            if let Some(vm) = VMS.read().expect("failed to read-lock VM pool").get(&config) {
+                return vm.clone();
+            }
+        }
         let engine = Engine::new(&default_wasmtime_config(&config))
             .expect("failed to construct Wasmtime engine");
-        Self { config, engine }
+        VMS.write()
+            .expect("failed to write-lock VM pool")
+            .entry(Arc::clone(&config))
+            .or_insert(Self { config, engine })
+            .clone()
     }
 
     #[tracing::instrument(target = "vm", level = "debug", "WasmtimeVM::compile_uncached", skip_all)]
