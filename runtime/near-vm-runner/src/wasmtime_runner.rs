@@ -18,11 +18,14 @@ use core::cell::{RefCell, UnsafeCell};
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use near_parameters::RuntimeFeesConfig;
-use near_parameters::vm::VMKind;
+use near_parameters::vm::{LimitConfig, VMKind};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, RwLock};
-use wasmtime::{Engine, ExternType, Instance, Linker, Memory, MemoryType, Module, Store, Strategy};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use wasmtime::{
+    DEFAULT_INSTANCE_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TABLE_LIMIT, Engine, ExternType,
+    Instance, Linker, Memory, MemoryType, Module, Store, Strategy,
+};
 
 const GUEST_PAGE_SIZE: usize = 1 << 16;
 
@@ -64,6 +67,59 @@ thread_local! {
 }
 
 pub struct WasmtimeMemory(Memory);
+
+struct InstanceContext {
+    store: Store<()>,
+    memory: Memory,
+    instance_budget: usize,
+    table_budget: usize,
+    memory_budget: usize,
+}
+
+impl InstanceContext {
+    fn new(engine: &Engine, config: &LimitConfig) -> Self {
+        let mut store = Store::new(engine, ());
+        let mut minimum = config
+            .initial_memory_pages
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .saturating_mul(GUEST_PAGE_SIZE);
+        let maximum = config
+            .max_memory_pages
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .saturating_mul(GUEST_PAGE_SIZE);
+        let mut initial_memory_pages = config.initial_memory_pages;
+        let host_page_size = host_page_size();
+        while minimum < maximum {
+            let host_rem = minimum % host_page_size;
+            let guest_rem = minimum % GUEST_PAGE_SIZE;
+            if host_rem == 0 && guest_rem == 0 {
+                // Ensure that the mmap-ed memory region size is a multiple of host page size to ensure CoW is used
+                // https://github.com/bytecodealliance/wasmtime/blob/18b42ef4e48e498026237013df8ed5af9da0d72d/crates/wasmtime/src/runtime/vm/memory.rs#L526-L530
+                initial_memory_pages =
+                    u32::try_from(minimum.saturating_div(GUEST_PAGE_SIZE)).unwrap_or(u32::MAX);
+                break;
+            }
+            minimum = minimum.saturating_add(host_rem.max(guest_rem)).min(maximum);
+        }
+        let memory = Memory::new(
+            &mut store,
+            MemoryType::new(initial_memory_pages, Some(config.max_memory_pages)),
+        )
+        .expect("failed to construct memory");
+        Self {
+            store,
+            memory,
+            instance_budget: DEFAULT_INSTANCE_LIMIT,
+            table_budget: DEFAULT_TABLE_LIMIT,
+            memory_budget: DEFAULT_MEMORY_LIMIT,
+        }
+    }
+}
+
+static INSTANCE_CONTEXTS: LazyLock<Mutex<HashMap<Arc<Config>, Vec<InstanceContext>>>> =
+    LazyLock::new(Mutex::default);
 
 fn with_caller<T>(func: impl FnOnce(&mut Caller) -> T) -> T {
     CALLER.with(|caller| func(caller.borrow_mut().as_mut().unwrap()))
@@ -370,8 +426,39 @@ impl crate::runner::VM for WasmtimeVM {
                     return Ok(PreparedContract { config, gas_counter, result });
                 }
 
-                let result =
-                    PreparationResult::Ready(ReadyContract { module, method: method.into() });
+                {
+                    let mut cxs =
+                        INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+                    let resources = module.resources_required();
+                    let num_memories = resources.num_memories.try_into().unwrap_or(usize::MAX);
+                    let num_tables = resources.num_tables.try_into().unwrap_or(usize::MAX);
+                    if let Some(cxs) = cxs.get_mut(&self.config) {
+                        while let Some(mut context) = cxs.pop() {
+                            if let Some(budget) = context.memory_budget.checked_sub(num_memories) {
+                                context.memory_budget = budget;
+                            } else {
+                                continue;
+                            }
+                            if let Some(budget) = context.table_budget.checked_sub(num_tables) {
+                                context.table_budget = budget;
+                            } else {
+                                continue;
+                            }
+                            let result = PreparationResult::Ready(ReadyContract {
+                                context,
+                                module,
+                                method: method.into(),
+                            });
+                            return Ok(PreparedContract { config, gas_counter, result });
+                        }
+                    }
+                }
+                let context = InstanceContext::new(module.engine(), &config.limit_config);
+                let result = PreparationResult::Ready(ReadyContract {
+                    context,
+                    module,
+                    method: method.into(),
+                });
                 Ok(PreparedContract { config, gas_counter, result })
             },
         );
@@ -380,6 +467,7 @@ impl crate::runner::VM for WasmtimeVM {
 }
 
 struct ReadyContract {
+    context: InstanceContext,
     module: Module,
     method: Box<str>,
 }
@@ -452,7 +540,12 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
     ) -> VMResult {
         let PreparedContract { config, gas_counter, result } = (*self)?;
         let result_state = ExecutionResultState::new(&context, gas_counter, config);
-        let ReadyContract { module, method } = match result {
+        let ReadyContract {
+            context:
+                InstanceContext { mut store, memory, instance_budget, table_budget, memory_budget },
+            module,
+            method,
+        } = match result {
             PreparationResult::Ready(r) => r,
             PreparationResult::OutcomeAbortButNopInOldProtocol(e) => {
                 return Ok(VMOutcome::abort_but_nop_outcome_in_old_protocol(result_state, e));
@@ -461,50 +554,31 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
                 return Ok(VMOutcome::abort(result_state, e));
             }
         };
+        let instance_budget = instance_budget.saturating_sub(1);
 
         let config = Arc::clone(&result_state.config);
-        let engine = module.engine();
-        let mut store = Store::new(engine, ());
-        let mut minimum_mem = config
-            .limit_config
-            .initial_memory_pages
-            .try_into()
-            .unwrap_or(usize::MAX)
-            .saturating_mul(GUEST_PAGE_SIZE);
-        let maximum_mem = config
-            .limit_config
-            .max_memory_pages
-            .try_into()
-            .unwrap_or(usize::MAX)
-            .saturating_mul(GUEST_PAGE_SIZE);
-        let mut initial_memory_pages = config.limit_config.initial_memory_pages;
-        let host_page_size = host_page_size();
-        while minimum_mem < maximum_mem {
-            let host_rem = minimum_mem % host_page_size;
-            let guest_rem = minimum_mem % GUEST_PAGE_SIZE;
-            if host_rem == 0 && guest_rem == 0 {
-                // Ensure that the mmap-ed memory region size is a multiple of host page size to ensure CoW is used
-                // https://github.com/bytecodealliance/wasmtime/blob/18b42ef4e48e498026237013df8ed5af9da0d72d/crates/wasmtime/src/runtime/vm/memory.rs#L526-L530
-                initial_memory_pages =
-                    u32::try_from(minimum_mem.saturating_div(GUEST_PAGE_SIZE)).unwrap_or(u32::MAX);
-                break;
-            }
-            minimum_mem = minimum_mem.saturating_add(host_rem.max(guest_rem)).min(maximum_mem);
-        }
-        let memory = Memory::new(
-            &mut store,
-            MemoryType::new(initial_memory_pages, Some(config.limit_config.max_memory_pages)),
-        )
-        .expect("failed to construct memory");
-
         let mut logic_memory = WasmtimeMemory(memory);
         let mut logic = VMLogic::new(ext, context, fees_config, result_state, &mut logic_memory);
-        let mut linker = Linker::new(engine);
+        let mut linker = Linker::new(store.engine());
         // TODO: config could be accessed through `logic.result_state`, without this code having to
         // figure it out...
         link(&mut linker, memory, &store, &config, &mut logic);
-        let res = instantiate_and_call(&mut store, &linker, &module, &method);
-        lazy_drop(Box::new((linker, module, store)));
+
+        let res = instantiate_and_call(&mut store, &mut linker, &module, &method);
+        if instance_budget > 0 && table_budget > 0 && memory_budget > 0 {
+            let mut stores =
+                INSTANCE_CONTEXTS.lock().expect("failed to lock instance context pool");
+            stores.entry(config).or_default().push(InstanceContext {
+                store,
+                memory,
+                instance_budget,
+                table_budget,
+                memory_budget,
+            });
+            lazy_drop(Box::new((linker, module)));
+        } else {
+            lazy_drop(Box::new((linker, module, store)));
+        }
         match res? {
             RunOutcome::Ok => Ok(VMOutcome::ok(logic.result_state)),
             RunOutcome::AbortNop(error) => {
