@@ -39,6 +39,7 @@ enum ContractCacheKey {
 
 fn vm_hash(vm_kind: VMKind) -> u64 {
     eprintln!("YOW {:?}", vm_kind);
+    eprintln!("NOPE {:?}", vm_kind);
     match vm_kind {
         #[cfg(feature = "wasmtime_vm")]
         VMKind::Wasmtime => crate::wasmtime_runner::wasmtime_vm_hash(),
