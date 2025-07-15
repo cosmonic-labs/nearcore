@@ -217,6 +217,7 @@ impl WasmtimeVM {
     ) -> VMResult<PreparedContract> {
         type MemoryCacheType = (u64, Result<Module, CompilationError>);
         let to_any = |v: MemoryCacheType| -> Box<dyn std::any::Any + Send> { Box::new(v) };
+        eprintln!("COMPILE_AND_LOADED {:?}", self.config.vm_kind);
         let key = get_contract_cache_key(contract.hash(), &self.config);
         let (wasm_bytes, module_result) = cache.memory_cache().try_lookup(
             key,
