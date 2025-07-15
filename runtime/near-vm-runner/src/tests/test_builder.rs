@@ -189,7 +189,7 @@ impl TestBuilder {
 
                 let mut runtime_config = runtime_config_store.get_config(protocol_version);
                 eprintln!("Runtime Config: {:?}", runtime_config.wasm_config.vm_kind);
-                let runconfig = Arc::get_mut(&mut Arc::get_mut(&mut runtime_config).unwrap().wasm_config).unwrap().vm_kind = vm_kind;
+                //let runconfig = Arc::get_mut(&mut Arc::get_mut(&mut runtime_config).unwrap().wasm_config).unwrap().vm_kind = vm_kind;
                 let mut fake_external = MockedExternal::with_code(self.code.clone_for_tests());
                 let config = runtime_config.wasm_config.clone();
                 let fees = Arc::new(RuntimeFeesConfig::test());
