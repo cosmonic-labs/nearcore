@@ -187,7 +187,7 @@ impl TestBuilder {
                     continue;
                 }
 
-                let mut runtime_config = runtime_config_store.get_config_mut(protocol_version);
+                let runtime_config = runtime_config_store.get_config_mut(protocol_version);
                 Arc::get_mut(&mut Arc::get_mut(runtime_config).unwrap().wasm_config).unwrap().vm_kind = vm_kind;
                 eprintln!("Runtime Config: {:?}", runtime_config.wasm_config.vm_kind);
                 let mut fake_external = MockedExternal::with_code(self.code.clone_for_tests());
@@ -195,16 +195,12 @@ impl TestBuilder {
                 let fees = Arc::new(RuntimeFeesConfig::test());
                 let context = self.context.clone();
                 let gas_counter = context.make_gas_counter(&config);
-                eprintln!("SKIPPING: {:?}", vm_kind);
                 let Some(runtime) = vm_kind.runtime(config) else {
                     panic!("runtime for {:?} has not been compiled", vm_kind);
                 };
-                eprintln!("SKIPPING 2 : {:?}", vm_kind);
                 println!("Running {:?} for protocol version {}", vm_kind, protocol_version);
                 let outcome = runtime.prepare(&fake_external, None, gas_counter, &self.method);
-                eprintln!("SKIPPING 3 : ");
                 let outcome = outcome.run(&mut fake_external, &context, fees);
-                eprintln!("SKIPPING 4 : {:?}", outcome);
                 let outcome = outcome.expect("execution failed");
 
                 let mut got = String::new();
