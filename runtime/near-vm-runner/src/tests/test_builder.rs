@@ -184,7 +184,6 @@ impl TestBuilder {
             let mut results = vec![];
             for vm_kind in [VMKind::NearVm, VMKind::Wasmtime] {
                 if self.skip.contains(&vm_kind) {
-                    eprintln!("SKIPPING: {:?}", vm_kind);
                     continue;
                 }
 
@@ -194,9 +193,11 @@ impl TestBuilder {
                 let fees = Arc::new(RuntimeFeesConfig::test());
                 let context = self.context.clone();
                 let gas_counter = context.make_gas_counter(&config);
+                eprintln!("SKIPPING: {:?}", vm_kind);
                 let Some(runtime) = vm_kind.runtime(config) else {
                     panic!("runtime for {:?} has not been compiled", vm_kind);
                 };
+                eprintln!("SKIPPING 2 : {:?}", vm_kind);
                 println!("Running {:?} for protocol version {}", vm_kind, protocol_version);
                 let outcome = runtime
                     .prepare(&fake_external, None, gas_counter, &self.method)
