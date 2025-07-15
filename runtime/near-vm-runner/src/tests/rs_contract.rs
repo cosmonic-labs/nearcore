@@ -121,6 +121,7 @@ fn run_test_ext(
     let fees = Arc::new(RuntimeFeesConfig::test());
     let context = create_context(input.to_vec());
     let gas_counter = context.make_gas_counter(&config);
+    eprintln!("VM_KIND rs_contract {:?}", &config);
     let runtime = vm_kind.runtime(config).expect("runtime has not been compiled");
     let outcome = runtime
         .prepare(&fake_external, None, gas_counter, &method)
@@ -215,7 +216,7 @@ pub fn test_out_of_memory() {
     with_vm_variants(&config, |vm_kind: VMKind| {
         // TODO: currently we only run this test on near-vm.
         match vm_kind {
-            VMKind::Wasmtime | VMKind::Wasmer2 | VMKind::Wasmer0 => return,
+            VMKind::Wasmer2 | VMKind::Wasmer0 => return,
             _ => {}
         }
 
@@ -232,9 +233,9 @@ pub fn test_out_of_memory() {
         assert_eq!(
             result.aborted,
             match vm_kind {
-                VMKind::NearVm | VMKind::NearVm2 =>
+                VMKind::NearVm | VMKind::NearVm2 | VMKind::Wasmtime =>
                     Some(FunctionCallError::WasmTrap(WasmTrap::Unreachable)),
-                VMKind::Wasmer2 | VMKind::Wasmer0 | VMKind::Wasmtime => unreachable!(),
+                VMKind::Wasmer2 | VMKind::Wasmer0 => unreachable!(),
             }
         );
     })
