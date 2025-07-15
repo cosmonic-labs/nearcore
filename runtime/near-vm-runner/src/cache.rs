@@ -51,13 +51,13 @@ fn vm_hash(vm_kind: VMKind) -> u64 {
         VMKind::NearVm2 => crate::near_vm_2_runner::near_vm_vm_hash(),
         #[cfg(not(all(feature = "near_vm", target_arch = "x86_64")))]
         VMKind::NearVm | VMKind::NearVm2 => panic!("NearVM is not enabled"),
-
         VMKind::Wasmer0 | VMKind::Wasmer2 => unreachable!(),
     }
 }
 
 #[tracing::instrument(level = "trace", target = "vm", "get_key", skip_all)]
 pub fn get_contract_cache_key(code_hash: CryptoHash, config: &Config) -> CryptoHash {
+    panic!("get_contract_key");
     let key = ContractCacheKey::Version5 {
         code_hash,
         vm_config_non_crypto_hash: config.non_crypto_hash(),
