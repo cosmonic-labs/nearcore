@@ -323,6 +323,7 @@ impl crate::runner::VM for WasmtimeVM {
             method,
             |gas_counter, module| {
                 let config = Arc::clone(&self.config);
+                eprintln!("PREPARE CONFIG CLOSURE {:?}", config.vm_kind);
                 match module.get_export(method) {
                     Some(export) => match export {
                         Func(func_type) => {
