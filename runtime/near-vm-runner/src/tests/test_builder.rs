@@ -184,6 +184,7 @@ impl TestBuilder {
             let mut results = vec![];
             for vm_kind in [VMKind::NearVm, VMKind::Wasmtime] {
                 if self.skip.contains(&vm_kind) {
+                    eprintln!("SKIPPING: {:?}", vm_kind);
                     continue;
                 }
 
