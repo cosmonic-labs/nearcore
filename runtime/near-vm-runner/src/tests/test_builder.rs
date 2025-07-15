@@ -200,7 +200,7 @@ impl TestBuilder {
                 eprintln!("SKIPPING 2 : {:?}", vm_kind);
                 println!("Running {:?} for protocol version {}", vm_kind, protocol_version);
                 let outcome = runtime.prepare(&fake_external, None, gas_counter, &self.method);
-                eprintln!("SKIPPING 3 : {:?}", outcome);
+                eprintln!("SKIPPING 3 : ");
                 let outcome = outcome.run(&mut fake_external, &context, fees);
                 eprintln!("SKIPPING 4 : {:?}", outcome);
                 let outcome = outcome.expect("execution failed");
