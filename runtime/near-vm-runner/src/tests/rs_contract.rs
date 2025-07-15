@@ -121,7 +121,9 @@ fn run_test_ext(
     let fees = Arc::new(RuntimeFeesConfig::test());
     let context = create_context(input.to_vec());
     let gas_counter = context.make_gas_counter(&config);
-    let runtime = vm_kind.runtime(config).expect("runtime has not been compiled");
+    let mut runtime = vm_kind.runtime(config).expect("runtime has not been compiled");
+    eprintln!("RUN TEST EXT {:?}", vm_kind);
+
     let outcome = runtime
         .prepare(&fake_external, None, gas_counter, &method)
         .run(&mut fake_external, &context, Arc::clone(&fees))
