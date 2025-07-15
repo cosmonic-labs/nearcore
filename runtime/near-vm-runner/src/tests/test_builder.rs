@@ -187,7 +187,7 @@ impl TestBuilder {
                     continue;
                 }
 
-                let runtime_config = runtime_config_store.get_config(protocol_version);
+                let mut runtime_config = runtime_config_store.get_config(protocol_version);
                 Arc::get_mut(&mut runtime_config.wasm_config).unwrap().vm_kind = vm_kind;
                 let mut fake_external = MockedExternal::with_code(self.code.clone_for_tests());
                 let config = runtime_config.wasm_config.clone();
