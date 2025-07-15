@@ -124,10 +124,12 @@ fn run_test_ext(
     let mut runtime = vm_kind.runtime(config).expect("runtime has not been compiled");
     eprintln!("RUN TEST EXT {:?}", vm_kind);
 
-    let outcome = runtime
-        .prepare(&fake_external, None, gas_counter, &method)
-        .run(&mut fake_external, &context, Arc::clone(&fees))
-        .unwrap_or_else(|err| panic!("Failed execution: {:?}", err));
+    let outcome = runtime.prepare(&fake_external, None, gas_counter, &method);
+    eprintln!("OUTCOME 1");
+    let outcome = outcome.run(&mut fake_external, &context, Arc::clone(&fees));
+    eprintln!("OUTCOME 2 {:?}", outcome);
+    let outcome = outcome.unwrap_or_else(|err| panic!("Failed execution: {:?}", err));
+    eprintln!("OUTCOME 3 {:?}", outcome);
 
     assert_eq!(outcome.profile.action_gas(), 0);
 
