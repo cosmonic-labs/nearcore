@@ -50,7 +50,7 @@ fn assert_run_result(result: VMResult, expected_value: u64) {
 pub fn test_read_write() {
     let config = Arc::new(test_vm_config());
     let fees = Arc::new(RuntimeFeesConfig::test());
-    with_vm_variants(&config, |vm_kind: VMKind| {
+    with_vm_variants(|vm_kind: VMKind| {
         let code = test_contract(vm_kind);
         let mut fake_external = MockedExternal::with_code(code);
         let context = create_context(encode(&[10u64, 20u64]));
@@ -80,27 +80,32 @@ macro_rules! def_test_ext {
     ($name:ident, $method:expr, $expected:expr, $input:expr, $validator:expr) => {
         #[test]
         pub fn $name() {
-            let config = Arc::new(test_vm_config());
-            with_vm_variants(&config, |vm_kind: VMKind| {
-                run_test_ext(Arc::clone(&config), $method, $expected, $input, $validator, vm_kind)
+            with_vm_variants(|vm_kind: VMKind| {
+                //let runtime_config = config.get_config_mut(protocol_version);
+                //Arc::get_mut(&mut Arc::get_mut(runtime_config).unwrap().wasm_config).unwrap().vm_kind = vm_kind;
+                let mut config = test_vm_config();
+                config.vm_kind = vm_kind;
+                run_test_ext(Arc::new(config), $method, $expected, $input, $validator, vm_kind)
             });
         }
     };
     ($name:ident, $method:expr, $expected:expr, $input:expr) => {
         #[test]
         pub fn $name() {
-            let config = Arc::new(test_vm_config());
-            with_vm_variants(&config, |vm_kind: VMKind| {
-                run_test_ext(Arc::clone(&config), $method, $expected, $input, vec![], vm_kind)
+            with_vm_variants(|vm_kind: VMKind| {
+                let mut config = test_vm_config();
+                config.vm_kind = vm_kind;
+                run_test_ext(Arc::new(config), $method, $expected, $input, vec![], vm_kind)
             });
         }
     };
     ($name:ident, $method:expr, $expected:expr) => {
         #[test]
         pub fn $name() {
-            let config = Arc::new(test_vm_config());
-            with_vm_variants(&config, |vm_kind: VMKind| {
-                run_test_ext(Arc::clone(&config), $method, $expected, &[], vec![], vm_kind)
+            with_vm_variants(|vm_kind: VMKind| {
+                let mut config = test_vm_config();
+                config.vm_kind = vm_kind;
+                run_test_ext(Arc::new(config), $method, $expected, &[], vec![], vm_kind)
             })
         }
     };
@@ -156,8 +161,8 @@ def_test_ext!(ext_storage_usage, "ext_storage_usage", &12u64.to_le_bytes());
 
 #[test]
 pub fn ext_used_gas() {
-    let config = Arc::new(test_vm_config());
-    with_vm_variants(&config, |vm_kind: VMKind| {
+    with_vm_variants(|vm_kind: VMKind| {
+        let config = Arc::new(test_vm_config());
         // Note, the used_gas is not a global used_gas at the beginning of method, but instead a
         // diff in used_gas for computing fib(30) in a loop
         let expected = [27, 180, 237, 15, 0, 0, 0, 0];
@@ -210,16 +215,17 @@ def_test_ext!(
 
 #[test]
 pub fn test_out_of_memory() {
-    let mut config = test_vm_config();
-    config.make_free();
-    let config = Arc::new(config);
-    with_vm_variants(&config, |vm_kind: VMKind| {
+    with_vm_variants(|vm_kind: VMKind| {
         // TODO: currently we only run this test on near-vm.
         match vm_kind {
             VMKind::Wasmer2 | VMKind::Wasmer0 => return,
             _ => {}
         }
 
+        let mut config = test_vm_config();
+        config.make_free();
+        config.vm_kind = vm_kind;
+        let config = Arc::new(config);
         let code = test_contract(vm_kind);
         let mut fake_external = MockedExternal::with_code(code);
         let context = create_context(Vec::new());
@@ -254,7 +260,7 @@ fn attach_unspent_gas_but_use_all_gas() {
     config.limit_config.max_gas_burnt = context.prepaid_gas / 3;
     let config = Arc::new(config);
 
-    with_vm_variants(&config, |vm_kind: VMKind| {
+    with_vm_variants(|vm_kind: VMKind| {
         let code = function_call_weight_contract();
         let mut external = MockedExternal::with_code(code);
         let fees = Arc::new(RuntimeFeesConfig::test());

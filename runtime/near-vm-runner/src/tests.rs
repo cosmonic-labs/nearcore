@@ -29,7 +29,6 @@ pub(crate) fn test_vm_config() -> near_parameters::vm::Config {
 }
 
 pub(crate) fn with_vm_variants(
-    #[allow(unused)] cfg: &near_parameters::vm::Config,
     runner: impl Fn(VMKind) -> (),
 ) {
     #[allow(unused)]

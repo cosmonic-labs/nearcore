@@ -48,8 +48,8 @@ mod tests {
 
     #[test]
     fn internal_memory_declaration() {
-        let config = test_vm_config();
-        with_vm_variants(&config, |kind| {
+        with_vm_variants(|kind| {
+            let config = test_vm_config();
             let r = parse_and_prepare_wat(&config, kind, r#"(module (memory 1 1))"#);
             assert_matches!(r, Ok(_));
         })
@@ -57,12 +57,13 @@ mod tests {
 
     #[test]
     fn memory_imports() {
-        let config = test_vm_config();
 
-        // This test assumes that maximum page number is configured to a certain number.
-        assert_eq!(config.limit_config.max_memory_pages, 2048);
 
-        with_vm_variants(&config, |kind| {
+        with_vm_variants(|kind| {
+            let config = test_vm_config();
+            // This test assumes that maximum page number is configured to a certain number.
+            assert_eq!(config.limit_config.max_memory_pages, 2048);
+
             let r = parse_and_prepare_wat(
                 &config,
                 kind,
@@ -102,8 +103,8 @@ mod tests {
 
     #[test]
     fn multiple_valid_memory_are_disabled() {
-        let config = test_vm_config();
-        with_vm_variants(&config, |kind| {
+        with_vm_variants(|kind| {
+            let config = test_vm_config();
             // Our preparation and sanitization pass assumes a single memory, so we should fail when
             // there are multiple specified.
             let r = parse_and_prepare_wat(
@@ -129,8 +130,8 @@ mod tests {
 
     #[test]
     fn imports() {
-        let config = test_vm_config();
-        with_vm_variants(&config, |kind| {
+        with_vm_variants(|kind| {
+            let config = test_vm_config();
             // nothing can be imported from non-"env" module for now.
             let r = parse_and_prepare_wat(
                 &config,
