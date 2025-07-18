@@ -4980,7 +4980,7 @@ not be assigned to specific chunks. The way we currently count write operations
 show up in the top-level list. Clearly, there is some room for improvement here.
 So far we simply haven't worried about RocksDB write performance so the tooling
 to debug write performance is naturally lacking.</p>
-<div style="break-before: page; page-break-before: always;"></div><!-- cspell:ignore Heaptrack Jemalloc bytehound highcpu jemallocator koute kptr libbytehound myexportedfile mylittleprofile readwrite rgba setcap tikv -->
+<div style="break-before: page; page-break-before: always;"></div><!-- cspell:ignore Heaptrack Jemalloc bytehound highcpu jemallocator koute kptr libbytehound myexportedfile mylittleprofile read-write rgba setcap tikv -->
 <h1 id="profiling-neard"><a class="header" href="#profiling-neard">Profiling neard</a></h1>
 <h2 id="sampling-performance-profiling"><a class="header" href="#sampling-performance-profiling">Sampling performance profiling</a></h2>
 <p>It is a common task to need to look where <code>neard</code> is spending time. Outside of instrumentation
@@ -4990,8 +4990,7 @@ performance characteristics, but due to its probabilistic nature it is also not 
 when it comes to small details.</p>
 <p>Linux's <code>perf</code> has been a tool of choice in most cases, although tools like Intel VTune could be
 used too. In order to use either, first prepare your system:</p>
-<pre><code class="language-command">sudo sysctl kernel.perf_event_paranoid=0
-sudo sysctl kernel.kptr_restrict=0
+<pre><code class="language-command">sudo sysctl kernel.perf_event_paranoid=0 kernel.kptr_restrict=0
 </code></pre>
 <blockquote style="background: rgba(255, 200, 0, 0.1); border: 5px solid rgba(255, 200, 0, 0.4);">
 <p>Beware that this gives access to certain kernel state and environment to the unprivileged user.
@@ -5000,20 +4999,35 @@ better yet, reboot.</p>
 <p>Definitely do not run untrusted code after running these commands.</p>
 </blockquote>
 <p>Then collect a profile as such:</p>
-<pre><code class="language-command">$ perf record -e cpu-clock -F1000 -g --call-graph dwarf,65528 YOUR_COMMAND_HERE
+<!-- cspell: ignore ecpu esyscalls epoll esched -->
+<pre><code class="language-command">$ perf record -ecpu-clock -esyscalls:sys_enter_{&quot;epoll_*wait*&quot;,&quot;futex_wait*&quot;,futex_wake,io_uring_enter,nanosleep,pause,&quot;*poll&quot;,&quot;*select*&quot;,sched_yield,&quot;wait*&quot;} -esched:sched_switch -F1000 -g --call-graph dwarf,65528 [YOUR_COMMAND_HERE]
 # or attach to a running process:
-$ perf record -e cpu-clock -F1000 -g --call-graph dwarf,65528 -p NEARD_PID
+$ perf record -ecpu-clock -esyscalls:sys_enter_{&quot;epoll_*wait*&quot;,&quot;futex_wait*&quot;,futex_wake,io_uring_enter,nanosleep,pause,&quot;*poll&quot;,&quot;*select*&quot;,sched_yield,&quot;wait*&quot;} -esched:sched_switch -F1000 -g --call-graph dwarf,65528 -p [NEARD_PID]
+# possibly with a pre-specified collection duration
+$ timeout 15 perf record -ecpu-clock -esyscalls:sys_enter_{&quot;epoll_*wait*&quot;,&quot;futex_wait*&quot;,futex_wake,io_uring_enter,nanosleep,pause,&quot;*poll&quot;,&quot;*select*&quot;,sched_yield,&quot;wait*&quot;} -esched:sched_switch -F1000 -g --call-graph dwarf,65528 -p [NEARD_PID]
 </code></pre>
 <p>This command will use the CPU time clock to determine when to trigger a sampling process and will
-do such sampling roughly 1000 times (the <code>-F</code> argument) every CPU second.</p>
+do such sampling roughly 1000 times (the <code>-F</code> argument) every CPU second. It will also sample a
+selection of syscall entries as well as scheduler switches. Readers are encouraged to adjust the
+events they record – ones in the command above are a good baseline only.</p>
 <p>Once terminated, this command will produce a profile file in the current working directory.
 Although you can inspect the profile already with <code>perf report</code>, we've had much better experience
 with using <a href="https://profiler.firefox.com/">Firefox Profiler</a> as the viewer. Although Firefox
 Profiler supports <code>perf</code> and many other different data formats, for <code>perf</code> in particular a
-conversion step is necessary:</p>
-<pre><code class="language-command">perf script -F +pid &gt; mylittleprofile.script
+conversion step is necessary. For ideal results with Firefox Profiler,
+<a href="https://github.com/mstange/samply"><code>samply</code></a> is recommended, as it produces a much better
+rendering than the <code>perf script</code> approach previously recommended by this and <a href="https://profiler.firefox.com/docs/#/./guide-perf-profiling">Firefox Profiler
+documentation</a> alike.</p>
+<pre><code class="language-command">$ cargo install samply
+$ samply import -P 3333 perf.data
 </code></pre>
-<p>Then, load this <code>mylittleprofile.script</code> file with the profiler.</p>
+<p>This will open a local server with a profiler UI. If profiling on a cloud machine, use a SSH proxy
+to access this interface (you can start another ssh session):</p>
+<pre><code>$ gcloud compute ssh --ssh-flag='-L 3333:localhost:3333' [OTHER_ARGS...]
+# open localhost:3333 in your browser
+</code></pre>
+<p>From there you can inspect the profile locally and upload it to <code>profiler.firefox.com</code> for sharing
+with others.</p>
 <h3 id="low-overhead-stack-frame-collection"><a class="header" href="#low-overhead-stack-frame-collection">Low overhead stack frame collection</a></h3>
 <p>The command above uses <code>-g --call-graph dwarf,65528</code> parameter to instruct <code>perf</code> to collect
 stack trace for each sample using DWARF unwinding metadata. This will work no matter how <code>neard</code> is
@@ -5023,8 +5037,25 @@ collection.</p>
 <pre><code class="language-command">cargo build --release --config .cargo/config.profiling.toml -p neard
 </code></pre>
 <p>Then, replace the <code>--call-graph dwarf</code> with <code>--call-graph fp</code>:</p>
-<pre><code class="language-command">perf record -e cpu-clock -F1000 -g --call-graph fp,65528 YOUR_COMMAND_HERE
+<pre><code class="language-command">perf record -ecpu-clock -esyscalls:sys_enter_{&quot;epoll_*wait*&quot;,&quot;futex_wait*&quot;,futex_wake,io_uring_enter,nanosleep,pause,&quot;*poll&quot;,&quot;*select*&quot;,sched_yield,&quot;wait*&quot;} -esched:sched_switch -F1000 -g --call-graph fp,65528 [YOUR_COMMAND_HERE]
 </code></pre>
+<h3 id="headless-samply-use"><a class="header" href="#headless-samply-use">Headless <code>samply</code> use</a></h3>
+<p>Samply instructions above require manual interaction with browsers, which makes automation
+difficult. If you'd like to just get files for, headless operation is also possible. Do note that
+the results produced this way lose some information that is otherwise made available with the
+instructions above. Most notably – kernel symbols may be lost.</p>
+<!-- cspell: ignore cswitch presymbolicate -->
+<pre><code>$ samply import --cswitch-markers --unstable-presymbolicate -s -n perf.data
+$ ls profile.json*
+</code></pre>
+<p>These files can later be viewed with</p>
+<pre><code>$ samply load
+</code></pre>
+<h3 id="lost-samples"><a class="header" href="#lost-samples">Lost samples</a></h3>
+<p>In some cases <code>perf</code> may complain about lost samples. This can happen more often when profiling
+<code>neard</code> with a large number threads. To mitigate sample loss, reduce the sampling rate, use <a href="practices/workflows/profiling.html#low-overhead-stack-frame-collection">low
+overhead stack frame collection</a> and/or record traces to a
+fast storage device (possibly <code>/tmp</code> mounted on <code>tmpfs</code>.)</p>
 <h3 id="profiling-with-hardware-counters"><a class="header" href="#profiling-with-hardware-counters">Profiling with hardware counters</a></h3>
 <p>As mentioned earlier, sampling profiler is probabilistic and the data it produces is only really
 suitable for a broad overview. Any attempt to analyze the performance of the code at the
@@ -5141,7 +5172,7 @@ alternatives that isolate certain components of the runtime:</p>
 the contract runtime only. A smart use of the tools already present in the <code>neard</code> binary can
 achieve that today.</p>
 <p>First, make sure all deltas in flat storage are applied and written:</p>
-<pre><code>neard view-state --readwrite apply-range --shard-id $SHARD_ID --storage flat sequential
+<pre><code>neard view-state --read-write apply-range --shard-id $SHARD_ID --storage flat sequential
 </code></pre>
 <p>You will need to do this for all shards you're interested in profiling. Then pick a block or a
 range of blocks you want to re-apply and set the flat head to the specified height:</p>
@@ -5152,9 +5183,9 @@ ways. Experiment with the different modes and flags to find the best fit for you
 forget to run these commands under the profiler :)</p>
 <pre><code># Apply blocks from current flat head to the highest known block height in sequence
 # using the memtrie storage (note that after this you will need to move the flat head again)
-neard view-state --readwrite apply-range --shard-id 0 --storage memtrie sequential
+neard view-state --read-write apply-range --shard-id 0 --storage memtrie sequential
 # Same but with flat storage
-neard view-state --readwrite apply-range --shard-id 0 --storage flat sequential
+neard view-state --read-write apply-range --shard-id 0 --storage flat sequential
 
 # Repeatedly apply a single block at the flat head using the memtrie storage.
 # Will not modify the storage on the disk.
@@ -5177,7 +5208,9 @@ Which makes it most representative for measuring the realistic throughput of the
 <p>One needs to compile the <code>benchmarks/synth-bm</code>, create the link to the <code>neard</code> executable and run the tasks from the <code>justfile</code>.
 The details are available on the dedicated <a href="practices/workflows/./benchmarking_synthetic_workloads.html">page</a>.</p>
 <h3 id="direct-transaction-injection"><a class="header" href="#direct-transaction-injection">Direct transaction injection</a></h3>
-<p>This benchmark bypasses the RPC layer and injects the transactions using direct calls to the ingress handling actor. 
+<p>This section closely follows (duplicates) the dedicated <code>readme.md</code> in <code>benchmarks/transaction-generator</code>.
+In case of questions you may want to consult that as well.</p>
+<p>This benchmark bypasses the RPC layer and injects the transactions using direct calls to the ingress handling actor.
 It is representative of the performance of the <code>neard</code> excluding the RPC layer.
 The single-node setup of this benchmark is a part of the CI.</p>
 <h4 id="run-the-benchmark"><a class="header" href="#run-the-benchmark">Run the benchmark</a></h4>
@@ -5199,6 +5232,33 @@ The single-node setup of this benchmark is a part of the CI.</p>
 <p>The last command will init a single-node network, apply customizations to the config, create the accounts and run the benchmark for 3m.
 All of it.
 For a more fine-grained control feel free to dive into the <code>justfile</code> for the commands executing the intermediate steps.</p>
+<h4 id="tweaking-the-load-generation-parameters"><a class="header" href="#tweaking-the-load-generation-parameters">Tweaking the load generation parameters</a></h4>
+<p>The load generation parameters are expected as a part of the <code>neard</code> <code>config.json</code>.
+The node name is &quot;tx_generator&quot; and is optional. 
+In case the node is missing the error message is printed out and the <code>neard</code> continues running as usually.
+The node currently consists of the path to  &quot;schedule&quot; and &quot;controller&quot; sections</p>
+<pre><code class="language-json">{
+	&quot;tx_generator&quot;: {
+		&quot;accounts_path&quot;: &quot;{{near_accounts_path}}&quot;,
+		&quot;schedule&quot;: [
+			{ &quot;tps&quot;: 1000, &quot;duration_s&quot;: 60 },
+			{ &quot;tps&quot;: 2000, &quot;duration_s&quot;: 60 }
+		],
+		&quot;controller&quot;: {
+			&quot;target_block_production_time_s&quot;: 1.4,
+			&quot;bps_filter_window_length&quot;: 64,
+			&quot;gain_proportional&quot;: 20,
+			&quot;gain_integral&quot;: 0.0,
+			&quot;gain_derivative&quot;: 0.0
+		}
+	}
+}
+
+</code></pre>
+<p>The &quot;schedule&quot; section is required and defines the load applying schedule. 
+After the schedule completes the <code>neard</code> will exit in case &quot;controller&quot; is not defined, or else will run the control loop defined by the parameters indefinitely.
+The last scheduled TPS is than used as a starting point and the loop adjusts TPS to keep the target block production time at a desired value.
+Note that the resulting production time currently tends to be slightly under the target value.</p>
 <h4 id="what-you-should-see"><a class="header" href="#what-you-should-see">What you should see</a></h4>
 <ul>
 <li>observe the load reported in the logs</li>
@@ -5207,7 +5267,7 @@ For a more fine-grained control feel free to dive into the <code>justfile</code>
 2025-02-12T16:42:37.351118Z  INFO stats: #    1584 6nxZon12xBTmARmUm3ngtgaA2K7V9dX1J13EtPZ2kEhe Validator | 1 validator 0 peers ⬇ 0 B/s ⬆ 0 B/s 1.60 bps 131 Tgas/s CPU: 70%, Mem: 2.98 GB
 ...
 2025-02-18T13:04:29.790195Z  INFO transaction-generator: total=&quot;Stats { pool_accepted: 158247, pool_rejected: 237, included_in_chunks: 155338, failed:0 }&quot;
-2025-02-18T13:04:29.790208Z  INFO transaction-generator: diff=&quot;Stats { pool_accepted: 6049, pool_rejected: 0, included_in_chunks: 6439, failed: 0 }, mean_processing_rate=6036&quot;
+2025-02-18T13:04:29.790208Z  INFO transaction-generator: diff=&quot;Stats { pool_accepted: 6049, pool_rejected: 0, included_in_chunks: 6439, failed: 0 }, rate=6036&quot;
 ...
 </code></pre>
 <ul>
@@ -5226,7 +5286,7 @@ When the latter starts to grow that means the network no longer sustains the loa
 The detailed description of it is provided in the <a href="practices/workflows/./profiling.html">profiling</a> section, <code>Runtime::apply</code> subsection.
 To evaluate the number of rate of processing the transactions one may query the stats as described above.</p>
 <h3 id="multi-node-setup"><a class="header" href="#multi-node-setup">Multi-Node setup</a></h3>
-<p>For benchmarking multi-node sharded networks, there is a comprehensive toolset in the <a href="https://github.com/near/nearcore/tree/master/benchmarks/sharded-bm">sharded-bm</a> directory. This framework allows testing various network configurations with different numbers of shards, validators and traffic profiles.</p>
+<p>For benchmarking multi-node sharded networks, there is a comprehensive toolset in the <a href="https://github.com/near/nearcore/tree/pytest/tests/mocknet/sharded_bm.py">sharded-bm</a>. This framework allows testing various network configurations with different numbers of shards, validators and traffic profiles.</p>
 <p>The sharded benchmark framework supports both localnet testing on a single machine and forknet deployments. Forknet is particularly useful as it allows creating a network running on multiple VMs, providing real-world conditions for performance testing.</p>
 <p>To run sharded benchmarks on a forknet, you'll need to:</p>
 <ol>
@@ -5235,7 +5295,8 @@ To evaluate the number of rate of processing the transactions one may query the 
 <li>Initialize and start the network</li>
 <li>Create test accounts and run the benchmark</li>
 </ol>
-<p>For detailed instructions and configuration options, refer to the <a href="https://github.com/near/nearcore/tree/master/benchmarks/sharded-bm/README.md#forknet">README</a>.</p>
+<p>Alternatively one may use the infra-ops <a href="https://github.com/Near-One/infra-ops/actions/workflows/benchmark.yml">workflow</a>.</p>
+<p>For detailed instructions and configuration options, refer to the <a href="https://github.com/near/nearcore/tree/master/pytest/tests/mocknet/docs/sharded_bm.md">README</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div><!-- cspell:ignore nearinc pkill rgba xdwp -->
 <h1 id="working-with-opentelemetry-traces"><a class="header" href="#working-with-opentelemetry-traces">Working with OpenTelemetry Traces</a></h1>
 <p><code>neard</code> is instrumented in a few different ways. From the code perspective we have two major ways
