@@ -168,7 +168,7 @@ fn test_near_vm_artifact_output_stability() {
     for seed in seeds {
         let contract = ContractCode::new(near_test_contracts::arbitrary_contract(seed), None);
 
-        let mut config = test_vm_config();
+        let mut config = test_vm_config(Some(VMKind::NearVm));
         config.reftypes_bulk_memory = false; // FIXME: ProtocolFeature::RefTypesBulkMemory
         let prepared_code =
             prepare::prepare_contract(contract.code(), &config, VMKind::NearVm).unwrap();

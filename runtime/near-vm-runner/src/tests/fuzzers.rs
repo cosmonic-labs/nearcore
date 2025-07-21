@@ -124,7 +124,7 @@ fn slow_test_near_vm_is_reproducible_fuzzer() {
 
     bolero::check!().with_arbitrary::<ArbitraryModule>().for_each(|module: &ArbitraryModule| {
         let code = ContractCode::new(module.0.to_bytes(), None);
-        let config = std::sync::Arc::new(test_vm_config());
+        let config = std::sync::Arc::new(test_vm_config(Some(VMKind::NearVm)));
         let mut first_hash = None;
         for _ in 0..3 {
             let vm = NearVM::new(config.clone());
