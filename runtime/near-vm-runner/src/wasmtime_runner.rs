@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use wasmtime::{Engine, ExternType, Instance, Linker, Memory, MemoryType, Module, Store, Strategy};
 
-type Caller = wasmtime::Caller<'static, Option<VMLogic<'static>>>;
+type Caller = wasmtime::Caller<'static, Ctx>;
 
 #[derive(Default)]
 pub struct Ctx {
@@ -38,13 +38,15 @@ impl WasmtimeMemory {
         initial_memory_bytes: u32,
         max_memory_bytes: u32,
     ) -> Result<Self, FunctionCallError> {
+        // Clone the caller for future access outside of the store's context
+        let caller = store.data().caller.clone();
         Ok(WasmtimeMemory {
             memory: Memory::new(
                 store,
                 MemoryType::new(initial_memory_bytes, Some(max_memory_bytes)),
             )
             .map_err(|_| PrepareError::Memory)?,
-            caller: Arc::default(),
+            caller,
         })
     }
 }
@@ -52,7 +54,7 @@ impl WasmtimeMemory {
 impl WasmtimeMemory {
     fn with_caller<T>(&self, func: impl FnOnce(&mut Caller) -> T) -> T {
         let mut caller = self.caller.borrow_mut();
-        func(caller.as_mut().unwrap())
+        func(caller.as_mut().expect("caller missing"))
     }
 }
 
@@ -142,7 +144,7 @@ impl IntoVMError for anyhow::Error {
 
 #[allow(clippy::needless_pass_by_ref_mut)]
 pub fn get_engine(config: &wasmtime::Config) -> Engine {
-    Engine::new(config).unwrap()
+    Engine::new(config).expect("failed to construct engine")
 }
 
 pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
@@ -460,14 +462,14 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
             config.limit_config.initial_memory_pages,
             config.limit_config.max_memory_pages,
         )
-        .unwrap();
+        .expect("failed to construct wasmtime memory");
         let logic = VMLogic::new(ext, context, fees_config, result_state, &mut memory);
         store.data_mut().logic.replace(unsafe { transmute(logic) });
 
         let mut linker = Linker::new(engine);
         // TODO: config could be accessed through `logic.result_state`, without this code having to
         // figure it out...
-        link(&mut linker, memory.memory.clone(), &store, &config);
+        link(&mut linker, memory.memory, &store, &config);
         let res = instantiate_and_call(&mut store, &linker, &module, &method);
         let logic = store.data_mut().logic.take().expect("logic missing");
         lazy_drop(Box::new((linker, module)));
@@ -498,7 +500,7 @@ impl std::fmt::Display for ErrorContainer {
     }
 }
 
-fn link<'a, 'b>(
+fn link(
     linker: &mut wasmtime::Linker<Ctx>,
     memory: wasmtime::Memory,
     store: &wasmtime::Store<Ctx>,
@@ -516,18 +518,21 @@ fn link<'a, 'b>(
                 let _span = TRACE.then(|| {
                     tracing::trace_span!(target: "vm::host_function", stringify!($name)).entered()
                 });
-                let ctx = caller.data_mut();
-                let mut logic = ctx.logic.take().expect("logic missing");
-                // Transmute the lifetime of caller so it's possible to put it in a thread-local.
-                *ctx.caller.borrow_mut() = unsafe { transmute(caller) };
+
+                // TODO: Consider anyhow context
+                let mut logic = caller.data_mut().logic.take().expect("logic missing");
                 let res = match logic.$func( $( $arg_name as $arg_type, )* ) {
                     Ok(result) => Ok(result as ($( $returns ),* ) ),
                     Err(err) => {
                         Err(ErrorContainer(parking_lot::Mutex::new(Some(err))).into())
                     }
                 };
-                let mut caller = memory_caller.take().expect("caller missing");
-                caller.data_mut().replace(logic);
+                // replace the logic with the modified logic
+                caller.data_mut().logic.replace(logic);
+
+                // replace the caller with the wrapped function callen context
+                let memory_caller = caller.data_mut().caller.clone();
+                memory_caller.replace(Some(unsafe {transmute(caller)}));
                 res
             }
 
