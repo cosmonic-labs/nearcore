@@ -109,6 +109,7 @@ impl TestBuilder {
         self.skip_near_vm()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn only_near_vm(self) -> Self {
         self.skip_wasmtime()
     }
