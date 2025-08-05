@@ -86,12 +86,11 @@ impl<'a> PrepareContext<'a> {
                     self.copy_section(SectionId::Table, reader.range())?;
                 }
                 wp::Payload::MemorySection(reader) => {
-                    // We do not want to include the implicit memory anymore as we normalized it by
-                    // importing the memory instead.
                     self.ensure_import_section();
                     self.validator
                         .memory_section(&reader)
                         .map_err(|_| PrepareError::Deserialization)?;
+                    self.copy_section(SectionId::Memory, reader.range())?;
                 }
                 wp::Payload::GlobalSection(reader) => {
                     self.ensure_import_section();
@@ -225,7 +224,6 @@ impl<'a> PrepareContext<'a> {
             };
             new_section.import(import.module, import.name, new_type);
         }
-        new_section.import("env", "memory", self.memory_import());
         // wasm_encoder a section with all imports and the imported standardized memory.
         new_section.append_to(&mut self.output_code);
         Ok(())
@@ -235,7 +233,6 @@ impl<'a> PrepareContext<'a> {
         if self.before_import_section {
             self.before_import_section = false;
             let mut new_section = wasm_encoder::ImportSection::new();
-            new_section.import("env", "memory", self.memory_import());
             // wasm_encoder a section with all imports and the imported standardized memory.
             new_section.append_to(&mut self.output_code);
         }
