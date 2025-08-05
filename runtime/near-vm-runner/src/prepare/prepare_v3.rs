@@ -235,7 +235,6 @@ impl<'a> PrepareContext<'a> {
         if self.before_import_section {
             self.before_import_section = false;
             let mut new_section = wasm_encoder::ImportSection::new();
-            new_section.import("env", "memory", self.memory_import());
             // wasm_encoder a section with all imports and the imported standardized memory.
             new_section.append_to(&mut self.output_code);
         }
