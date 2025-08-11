@@ -232,21 +232,13 @@ impl<'a> PrepareContext<'a> {
     fn ensure_import_section(&mut self) {
         if self.before_import_section {
             self.before_import_section = false;
-            let mut new_section = wasm_encoder::ImportSection::new();
+            let new_section = wasm_encoder::ImportSection::new();
             // wasm_encoder a section with all imports and the imported standardized memory.
             new_section.append_to(&mut self.output_code);
         }
     }
 
-    fn memory_import(&self) -> wasm_encoder::EntityType {
-        wasm_encoder::EntityType::Memory(wasm_encoder::MemoryType {
-            minimum: u64::from(self.config.limit_config.initial_memory_pages),
-            maximum: Some(u64::from(self.config.limit_config.max_memory_pages)),
-            memory64: false,
-            shared: false,
-            page_size_log2: None,
-        })
-    }
+
 
     fn copy_section(
         &mut self,
