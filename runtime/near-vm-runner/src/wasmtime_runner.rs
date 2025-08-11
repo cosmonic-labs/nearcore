@@ -16,7 +16,7 @@ use near_parameters::vm::VMKind;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
-use wasmtime::{Engine, ExternType, Instance, Linker, Memory, MemoryType, Module, Store, Strategy};
+use wasmtime::{Engine, ExternType, Instance, Linker, Memory, Module, Store, Strategy};
 
 type Caller = wasmtime::Caller<'static, Ctx>;
 
@@ -34,19 +34,10 @@ pub struct WasmtimeMemory {
 
 impl WasmtimeMemory {
     pub fn new(
+        memory: Memory,
         caller: Arc<RefCell<Option<Caller>>>,
-        store: &mut Store<Ctx>,
-        initial_memory_bytes: u32,
-        max_memory_bytes: u32,
     ) -> Result<Self, FunctionCallError> {
-        Ok(WasmtimeMemory {
-            memory: Memory::new(
-                store,
-                MemoryType::new(initial_memory_bytes, Some(max_memory_bytes)),
-            )
-            .map_err(|_| PrepareError::Memory)?,
-            caller,
-        })
+        Ok(WasmtimeMemory { memory, caller })
     }
 }
 
@@ -418,17 +409,7 @@ fn call(
     }
 }
 
-fn instantiate_and_call(
-    mut store: &mut Store<Ctx>,
-    linker: &Linker<Ctx>,
-    module: &Module,
-    method: &str,
-) -> Result<RunOutcome, VMRunnerError> {
-    match linker.instantiate(&mut store, module) {
-        Ok(instance) => call(store, instance, method),
-        Err(err) => err.into_vm_error().map(RunOutcome::Abort),
-    }
-}
+
 
 impl crate::PreparedContract for VMResult<PreparedContract> {
     fn run(
@@ -458,13 +439,17 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         // Clone the caller for future access outside of the store's context
         let caller = Arc::clone(&ctx.caller);
         let mut store = Store::<Ctx>::new(engine, ctx);
-        let mut memory = WasmtimeMemory::new(
-            caller,
-            &mut store,
-            config.limit_config.initial_memory_pages,
-            config.limit_config.max_memory_pages,
-        )
-        .expect("failed to construct wasmtime memory");
+        let mut linker = Linker::new(engine);
+        link(&mut linker, &config);
+        let instance =
+            linker.instantiate(&mut store, &module).expect("failed to instantiate module");
+        let memory = instance.get_memory(&mut store, "memory").expect("failed to get memory");
+        let mut memory = WasmtimeMemory::new(memory, caller)
+            .expect("failed to construct wasmtime memory");
+        // TODO: config could be accessed through `logic.result_state`, without this code having to
+        // figure it out...
+        let res = call(&mut store, instance, &method);
+        //let res = instantiate_and_call(&mut store, &linker, &module, &method);
         let logic = VMLogic::new(ext, context, fees_config, result_state, &mut memory);
         // SAFETY:
         // Although the 'static here is a lie, we are pretty confident that the `VMLogic` here
@@ -475,12 +460,7 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
             .logic
             .replace(unsafe { transmute::<VMLogic<'_>, VMLogic<'static>>(logic) });
 
-        let mut linker = Linker::new(engine);
-        // TODO: config could be accessed through `logic.result_state`, without this code having to
-        // figure it out...
-        link(&mut linker, &config);
-        let res = instantiate_and_call(&mut store, &linker, &module, &method);
-        let logic = store.data_mut().logic.take().expect("logic missing");
+        let logic = store.data_mut().logic.take().expect("replaced VMlogic missing");
         lazy_drop(Box::new((linker, module)));
         match res? {
             RunOutcome::Ok => Ok(VMOutcome::ok(logic.result_state)),
@@ -509,11 +489,7 @@ impl std::fmt::Display for ErrorContainer {
     }
 }
 
-fn link(
-    linker: &mut wasmtime::Linker<Ctx>,
-    config: &Config,
-) {
-
+fn link(linker: &mut wasmtime::Linker<Ctx>, config: &Config) {
     macro_rules! add_import {
         (
           $mod:ident / $name:ident : $func:ident < [ $( $arg_name:ident : $arg_type:ident ),* ] -> [ $( $returns:ident ),* ] >
