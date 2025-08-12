@@ -856,7 +856,7 @@ fn test_memory_copy_aggregate_accounting() {
         .wat(
             r#"
             (module
-              (memory 0 100)
+              (memory 100 100)
               (func (export "main")
                 (memory.copy (i32.const 50) (i32.const 100) (i32.const 25))
               )
@@ -877,7 +877,7 @@ fn test_memory_copy_aggregate_accounting() {
         .wat(
             r#"
             (module
-              (memory 0 100)
+              (memory 100 100)
               (func (export "main")
                 (memory.copy (i32.const 50) (i32.const 100) (i32.const 50))
               )
