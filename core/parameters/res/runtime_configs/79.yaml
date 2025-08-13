@@ -5,3 +5,4 @@ max_congestion_missed_chunks: {
   old : 5,
   new : 125,
 }
+vm_kind: { old: "NearVm", new: "Wasmtime" }
