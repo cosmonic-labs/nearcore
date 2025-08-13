@@ -17,8 +17,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::sync::Arc;
 use wasmtime::{
-    Engine, Extern, ExternType, Instance, InstancePre, Linker, Module, ModuleExport, Store,
-    StoreLimits, StoreLimitsBuilder, Strategy,
+    Engine, Extern, ExternType, Instance, InstanceAllocationStrategy, InstancePre, Linker, Module,
+    ModuleExport, PoolingAllocationConfig, Store, StoreLimits, StoreLimitsBuilder, Strategy,
 };
 
 type Caller = wasmtime::Caller<'static, Ctx>;
@@ -30,6 +30,8 @@ pub struct Ctx {
 }
 
 const GUEST_PAGE_SIZE: usize = 1 << 16;
+
+const MAX_CONCURRENCY: u16 = 1 << 11;
 
 impl Ctx {
     fn new(logic: VMLogic<'static>, caller: Arc<RefCell<Option<Caller>>>) -> Self {
@@ -159,8 +161,24 @@ pub(crate) fn default_wasmtime_config(c: &Config) -> wasmtime::Config {
     // - https://docs.wasmtime.dev/examples-fast-execution.html
     // - https://docs.wasmtime.dev/examples-fast-instantiation.html
 
+    let max_memory_size = usize::try_from(c.limit_config.max_memory_pages)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(GUEST_PAGE_SIZE);
+    let mut pooling = PoolingAllocationConfig::default();
+    pooling
+        .max_memory_size(max_memory_size)
+        .table_elements(1_000_000)
+        .total_component_instances(0)
+        .total_core_instances(MAX_CONCURRENCY.into())
+        .total_memories(MAX_CONCURRENCY.into())
+        .total_tables(MAX_CONCURRENCY.into())
+        // Minimize page faults on Linux
+        .linear_memory_keep_resident(max_memory_size)
+        .table_keep_resident(1_000_000 * size_of::<*const ()>());
+
     let mut config = wasmtime::Config::from(features);
     config
+        .allocation_strategy(InstanceAllocationStrategy::Pooling(pooling))
         // From official documentation:
         // > Note that systems loading many modules may wish to disable this
         // > configuration option instead of leaving it on-by-default.
