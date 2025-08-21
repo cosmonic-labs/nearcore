@@ -43,9 +43,14 @@ wasm-encoder = { workspace = true, features = ["wasmparser"], optional = true }
 wasmparser = { workspace = true, optional = true }
 wasmparser-236 = { workspace = true, optional = true }
 wasmtime = { workspace = true, features = [
+    "addr2line",
+    "cranelift",
+    "debug-builtins",
+    "demangle",
     "call-hook",
     "parallel-compilation",
     "pooling-allocator",
+    "profiling",
     "runtime",
 ], optional = true }
 

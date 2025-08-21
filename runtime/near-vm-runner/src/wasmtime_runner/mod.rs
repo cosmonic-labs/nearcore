@@ -393,6 +393,8 @@ impl WasmtimeVM {
 
                 let mut engine_config = wasmtime::Config::from(features);
                 engine_config
+                    .debug_info(true)
+                    .profiler(wasmtime::ProfilingStrategy::JitDump)
                     .allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config))
                     // From official documentation:
                     // > Note that systems loading many modules may wish to disable this
