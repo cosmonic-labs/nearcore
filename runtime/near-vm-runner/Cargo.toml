@@ -42,8 +42,13 @@ tracing.workspace = true
 wasm-encoder = { workspace = true, optional = true }
 wasmparser = { workspace = true, optional = true }
 wasmtime = { workspace = true, features = [
+    "addr2line",
+    "cranelift",
+    "debug-builtins",
+    "demangle",
     "parallel-compilation",
     "pooling-allocator",
+    "profiling",
     "runtime",
 ], optional = true }
 
