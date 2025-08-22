@@ -333,6 +333,11 @@ impl GasCounter {
         self.promises_gas + self.fast_counter.burnt_gas
     }
 
+    /// Amount of gas still remaining
+    pub(crate) fn remaining_gas(&self) -> Gas {
+        self.prepaid_gas.saturating_sub(self.used_gas())
+    }
+
     pub(crate) fn profile_data(&self) -> ProfileDataV3 {
         self.profile.clone()
     }

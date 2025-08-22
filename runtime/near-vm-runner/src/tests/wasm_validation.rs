@@ -167,7 +167,7 @@ fn memory_export_method() {
         .method("memory")
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 81242631 used gas 81242631
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 74660583 used gas 74660583
             "#]],
         ]);
 }
@@ -202,7 +202,7 @@ fn memory_export_internal() {
         )
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 106296416 used gas 106296416
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 99714368 used gas 99714368
             "#]],
         ]);
 }
@@ -219,7 +219,7 @@ fn memory_custom() {
         )
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 92135581 used gas 92135581
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 85553533 used gas 85553533
             "#]],
         ]);
 }

@@ -155,7 +155,7 @@ fn slow_test_limit_contract_functions_number() {
     )
     .expects(&[
         expect![[r#"
-            VMOutcome: balance 4 storage_usage 12 return data None burnt gas 65437853336 used gas 65437853336
+            VMOutcome: balance 4 storage_usage 12 return data None burnt gas 65431271288 used gas 65431271288
         "#]],
     ]);
 
@@ -237,7 +237,6 @@ fn test_limit_locals() {
         .expects(&[
             expect![[r#"
                 VMOutcome: balance 4 storage_usage 12 return data None burnt gas 76839173 used gas 76839173
-                Err: ...
             "#]],
         ]);
 }
@@ -269,7 +268,7 @@ fn slow_test_limit_locals_global() {
         .opaque_error()
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 13419362816 used gas 13419362816
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 557218268 used gas 557218268
             "#]]
         ]);
 }
@@ -287,7 +286,7 @@ pub fn test_stabilized_host_function() {
         )
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 7226376631 used gas 7226376631
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 7216503564 used gas 7216503564
             "#]],
         ]);
 }
@@ -329,7 +328,7 @@ fn extension_signext() {
     );
     tb.expects(&[
         expect![[r#"
-            VMOutcome: balance 4 storage_usage 12 return data None burnt gas 123725136 used gas 123725136
+            VMOutcome: balance 4 storage_usage 12 return data None burnt gas 117143088 used gas 117143088
         "#]],
     ]);
 }

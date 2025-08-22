@@ -6,7 +6,9 @@ use crate::logic::errors::{
 use crate::logic::logic::Promise;
 use crate::logic::recorded_storage_counter::RecordedStorageCounter;
 use crate::logic::vmstate::Registers;
-use crate::logic::{Config, ExecutionResultState, External, GasCounter, VMContext, VMOutcome};
+use crate::logic::{
+    Config, ExecutionResultState, External, GasCounter, HostError, VMContext, VMOutcome,
+};
 use crate::runner::VMResult;
 use crate::{
     CompiledContract, CompiledContractInfo, Contract, ContractCode, ContractRuntimeCache,
@@ -300,6 +302,9 @@ impl IntoVMError for anyhow::Error {
                     T::UnreachableCodeReached => WasmTrap::Unreachable,
                     T::Interrupt => break 'nondet "interrupt",
                     T::HeapMisaligned => break 'nondet "heap misaligned",
+                    T::OutOfFuel => {
+                        return Ok(FunctionCallError::HostError(HostError::GasExceeded));
+                    }
                     t => {
                         return Err(VMRunnerError::WasmUnknownError {
                             debug_message: format!("unhandled trap type: {:?}", t),
@@ -394,8 +399,6 @@ impl WasmtimeVM {
                     .wasm_backtrace_details(WasmBacktraceDetails::Disable)
                     // Enable copy-on-write heap images.
                     .memory_init_cow(true)
-                    // Wasm stack metering is implemented by instrumentation, we don't want wasmtime to trap before that
-                    .max_wasm_stack(1024 * 1024 * 1024)
                     // Enable the Cranelift optimizing compiler.
                     .strategy(Strategy::Cranelift)
                     // Enable signals-based traps. This is required to elide explicit bounds-checking.
@@ -410,6 +413,7 @@ impl WasmtimeVM {
                     .memory_may_move(false)
                     .memory_reservation(max_memory_size.try_into().unwrap_or(u64::MAX))
                     .memory_reservation_for_growth(0)
+                    .consume_fuel(true)
                     .cranelift_nan_canonicalization(true);
 
                 let config = Arc::clone(config);
@@ -700,10 +704,29 @@ impl crate::PreparedContract for VMResult<PreparedContract> {
         // (which is covered by the original lifetime).
         let ext = unsafe { transmute::<&mut dyn External, &'static mut dyn External>(ext) };
         let context = unsafe { transmute::<&VMContext, &'static VMContext>(context) };
+        let gas = result_state.gas_counter.remaining_gas();
         let ctx = Ctx::new(ext, context, fees_config, result_state, memory);
 
         let mut store = Store::<Ctx>::new(pre.module().engine(), ctx);
         store.limiter(|ctx| &mut ctx.limits);
+        store.set_fuel(gas).expect("failed to set fuel");
+        store.call_hook(|mut store, hook| match hook {
+            wasmtime::CallHook::CallingHost => {
+                let gas = store.get_fuel()?;
+                let ctx = store.data_mut();
+                let burned = ctx.result_state.gas_counter.remaining_gas().saturating_sub(gas);
+                if burned > 0 {
+                    ctx.result_state.gas_counter.burn_gas(burned)?;
+                }
+                Ok(())
+            }
+            wasmtime::CallHook::ReturningFromHost => {
+                let ctx = store.data();
+                let gas = ctx.result_state.gas_counter.remaining_gas();
+                store.set_fuel(gas)
+            }
+            wasmtime::CallHook::CallingWasm | wasmtime::CallHook::ReturningFromWasm => Ok(()),
+        });
         let Some(_permit) = concurrency.try_acquire(num_tables) else {
             let Ctx { result_state, .. } = store.into_data();
             return Ok(VMOutcome::abort(

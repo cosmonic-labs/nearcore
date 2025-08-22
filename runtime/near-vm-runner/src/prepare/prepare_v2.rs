@@ -369,7 +369,7 @@ pub(crate) fn prepare_contract(
 ) -> Result<Vec<u8>, PrepareError> {
     let lightly_steamed = PrepareContext::new(original_code, features, config).run()?;
 
-    if kind == VMKind::NearVm {
+    if kind == VMKind::NearVm || kind == VMKind::Wasmtime {
         // Built-in near-vm code instruments code for itself.
         return Ok(lightly_steamed);
     }

@@ -20,7 +20,7 @@ fn memory_size_alignment_issue() {
         .method("foo")
         .expects(&[
             expect![[r#"
-                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 90513208 used gas 90513208
+                VMOutcome: balance 4 storage_usage 12 return data None burnt gas 82285648 used gas 82285648
             "#]],
         ]);
 }
@@ -43,9 +43,10 @@ fn slow_finite_wasm_gas_was_being_traced_and_thus_slow() {
             "#,
         )
         .method("foo")
+        .gas(100000)
         .expects(&[
             expect![[r#"
-              VMOutcome: balance 4 storage_usage 12 return data None burnt gas 100000000000000 used gas 100000000000000
+              VMOutcome: balance 4 storage_usage 12 return data None burnt gas 100000 used gas 100000
               Err: Exceeded the prepaid gas.
             "#]],
         ]);

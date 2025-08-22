@@ -159,7 +159,7 @@ pub fn ext_used_gas() {
         let config = Arc::new(test_vm_config(Some(vm_kind)));
         // Note, the used_gas is not a global used_gas at the beginning of method, but instead a
         // diff in used_gas for computing fib(30) in a loop
-        let expected = [27, 180, 237, 15, 0, 0, 0, 0];
+        let expected = [114, 10, 200, 15, 0, 0, 0, 0];
         run_test_ext(config, "ext_used_gas", &expected, &[], vec![], vm_kind)
     })
 }
