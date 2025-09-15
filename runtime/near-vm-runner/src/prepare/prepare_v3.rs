@@ -383,11 +383,13 @@ pub(crate) fn prepare_contract(
             PrepareError::Deserialization
         })?
         // Make sure contracts can’t call the instrumentation functions via `env`.
-        .instrument("internal", &lightly_steamed)
-        .map_err(|err| {
-            tracing::error!(?err, ?kind, "Instrumentation failed");
-            PrepareError::Serialization
-        })?;
+        .instrument(
+            "internal",
+            &lightly_steamed,
+            config.regular_op_cost,
+            config.limit_config.max_stack_height,
+        )
+        .expect("failed to instrument");
     Ok(res)
 }
 
