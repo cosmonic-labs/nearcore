@@ -6,3 +6,4 @@ max_congestion_missed_chunks: {
   new : 125,
 }
 vm_kind: { old: "NearVm", new: "Wasmtime" }
+reftypes_bulk_memory: { old: false, new: true }
