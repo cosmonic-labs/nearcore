@@ -77,6 +77,7 @@ fn gas_intrinsic_did_not_multiply_by_opcode_cost() {
 
 #[test]
 fn slow_test_parallel_runtime_invocations() {
+    eprintln!("{:?}", std::env::args().next());
     let mut join_handles = Vec::new();
     for _ in 0..128 {
         let handle = std::thread::spawn(|| {
